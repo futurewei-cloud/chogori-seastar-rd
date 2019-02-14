@@ -6,3 +6,4 @@ build.ninja
 cscope.*
 __pycache__/
 cmake/Cooking.cmake
+.cooking_memory

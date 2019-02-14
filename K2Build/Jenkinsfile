@@ -1,0 +1,59 @@
+pipeline {
+    agent any
+    stages {
+        stage('Checkout') {
+            agent {label "builder"}
+            steps {
+                echo "\u2600 Getting source"
+                // Get code
+                checkout([$class: 'GitSCM',
+                          branches: [[name: '*/master']],
+                          doGenerateSubmoduleConfigurations: false,
+                          extensions: [[$class: 'SubmoduleOption', disableSubmodules: false, parentCredentials: true, recursiveSubmodules: true, reference: '', trackingSubmodules: false]],
+                          submoduleCfg: [],
+                          userRemoteConfigs: [[credentialsId: 'fb82a473-e4f4-4f14-b0d5-0f28af79d0ca', url: 'git@rnd-github-usa-g.huawei.com:SeattleCloudBU/DFV_K2_SeaStar.git']]
+                        ])
+            }
+        }
+        stage('Build Builder Image') {
+            options { skipDefaultCheckout() }
+            agent {label "builder"}
+            steps {
+                echo "\u2600 Building Docker Builder Image"
+                sh "cd K2Build && make builder_img_build && make builder_img_push"
+            }
+        }
+        stage('Configure') {
+            options { skipDefaultCheckout() }
+            agent {label "builder"}
+            steps {
+                echo "\u2600 Building"
+                sh "./K2Build/k2build ./configure.py --mode=release --prefix=./install/usr/local"
+            }
+        }
+        stage('Build') {
+            options { skipDefaultCheckout() }
+            agent {label "builder"}
+            steps {
+                echo "\u2600 Building"
+                sh "./K2Build/k2build ninja -C build/release -j8"
+            }
+        }
+        stage('Install') {
+            options { skipDefaultCheckout() }
+            agent {label "builder"}
+            steps {
+                echo "\u2600 Building"
+                sh "./K2Build/k2build ninja -C build/release install"
+            }
+        }
+        stage('Test') {
+            options { skipDefaultCheckout() }
+            agent {label "builder"}
+            steps {
+                echo "\u2600 Test"
+                sh "./K2Build/k2build ninja -C build/release test"
+            }
+        }
+    }
+}

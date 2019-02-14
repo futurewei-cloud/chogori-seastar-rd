@@ -1,0 +1,12 @@
+#!/bin/bash
+# This script executes a command using the builder docker image
+topname=$(dirname "$0")
+cd ${topname}/..
+USE_PROXY=`make -pn -C K2Build 2>/dev/null| grep DOCKER_ARGS | tr " " "\n" | grep USE_PROXY`
+echo ">>> Using docker"
+# set interactive docker only if we're running inside a terminal
+if [ -t 1 ] ; then IT=-it; else IT=; fi
+echo ">>> Pulling latest builder image"
+docker pull k2-bvu-10001.huawei.com/k2seastar_builder:latest
+echo ">>> Executing command \"$*\" in the build container"
+docker run --init --rm ${IT} -v "${PWD}:/build" -e ${USE_PROXY} k2-bvu-10001.huawei.com/k2seastar_builder:latest "$@"
