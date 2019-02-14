@@ -1,9 +1,9 @@
 [submodule "dpdk"]
 	path = dpdk
-	url = https://github.com/scylladb/dpdk.git
+	url = git@rnd-github-usa-g.huawei.com:SeattleCloudBU/DFV_K2_OS_DPDK.git
 [submodule "fmt"]
 	path = fmt
-	url = https://github.com/scylladb/fmt.git
+	url = git@rnd-github-usa-g.huawei.com:SeattleCloudBU/DFV_K2_OS_fmt.git
 [submodule "K2Build/DFV_K2_BuildDeps"]
 	path = K2Build/DFV_K2_BuildDeps
-	url = http://rnd-github-usa-g.huawei.com/SeattleCloudBU/DFV_K2_BuildDeps.git
+	url = git@rnd-github-usa-g.huawei.com:SeattleCloudBU/DFV_K2_BuildDeps.git
