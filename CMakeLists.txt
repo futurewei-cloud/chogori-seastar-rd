@@ -231,9 +231,9 @@ find_package (Boost 1.64.0 REQUIRED
 
 find_package (c-ares 1.13.0 REQUIRED MODULE)
 find_package (cryptopp 5.6.5 REQUIRED)
-# No version information published.
+find_package (fmt 1.0.1 REQUIRED)
 find_package (dpdk)
-find_package (fmt 4.0.0 REQUIRED)
+# No version information published.
 find_package (lz4 1.7.3 REQUIRED)
 
 ##
@@ -972,6 +972,7 @@ if (Seastar_INSTALL)
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Findc-ares.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Findcryptopp.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Finddpdk.cmake
+      ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Findfmt.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Findhwloc.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Findlksctp-tools.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Findlz4.cmake

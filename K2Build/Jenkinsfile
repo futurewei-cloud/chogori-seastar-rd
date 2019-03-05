@@ -20,7 +20,8 @@ pipeline {
             agent {label "builder"}
             steps {
                 echo "\u2600 Building Docker Builder Image"
-                sh "cd K2Build && make builder_img_build && make builder_img_push"
+                sh "make -C K2Build builder_img_build"
+                sh "make -C K2Build builder_img_push"
             }
         }
         stage('Configure') {
@@ -68,8 +69,8 @@ pipeline {
             agent {label "builder"}
             steps {
                 echo "\u2600 Uploading artifacts"
-                sh "curl http://k2-bvu-10001.huawei.com:10080/incoming/ --upload-file seastar-k2_*.deb"
-                sh "curl http://k2-bvu-10001.huawei.com:10080/incoming/ --upload-file seastar-k2_*.changes"
+                sh "curl http://k2-bvu-10001.huawei.com:10080/incoming/ --upload-file libseastar-k2_*.deb"
+                sh "curl http://k2-bvu-10001.huawei.com:10080/incoming/ --upload-file libseastar-k2_*.changes"
             }
         }
     }
