@@ -9,3 +9,5 @@ RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-8 800 --slave /u
 # update-alternatives can now be used to set different gcc version, e.g.:
 # The default is the last one we installed above.
 #RUN update-alternatives --set gcc /usr/bin/gcc-7
+
+RUN proxy apt update && apt-get -y install libdpdk-k2-dev

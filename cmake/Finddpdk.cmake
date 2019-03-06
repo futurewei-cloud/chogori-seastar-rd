@@ -24,23 +24,12 @@ find_path (dpdk_INCLUDE_DIR
   NAMES rte_atomic.h
   PATH_SUFFIXES dpdk)
 
-find_library (dpdk_PMD_VMXNET3_UIO_LIBRARY rte_pmd_vmxnet3_uio)
+find_library (dpdk_PMD_MLX5_LIBRARY rte_pmd_mlx5)
 find_library (dpdk_PMD_I40E_LIBRARY rte_pmd_i40e)
-find_library (dpdk_PMD_IXGBE_LIBRARY rte_pmd_ixgbe)
-find_library (dpdk_PMD_E1000_LIBRARY rte_pmd_e1000)
-find_library (dpdk_PMD_BNXT_LIBRARY rte_pmd_bnxt)
-find_library (dpdk_PMD_RING_LIBRARY rte_pmd_ring)
-find_library (dpdk_PMD_CXGBE_LIBRARY rte_pmd_cxgbe)
-find_library (dpdk_PMD_ENA_LIBRARY rte_pmd_ena)
-find_library (dpdk_PMD_ENIC_LIBRARY rte_pmd_enic)
-find_library (dpdk_PMD_FM10K_LIBRARY rte_pmd_fm10k)
-find_library (dpdk_PMD_NFP_LIBRARY rte_pmd_nfp)
-find_library (dpdk_PMD_QEDE_LIBRARY rte_pmd_qede)
 find_library (dpdk_RING_LIBRARY rte_ring)
 find_library (dpdk_KVARGS_LIBRARY rte_kvargs)
 find_library (dpdk_MEMPOOL_LIBRARY rte_mempool)
 find_library (dpdk_MEMPOOL_RING_LIBRARY rte_mempool_ring)
-find_library (dpdk_PMD_SFC_EFX_LIBRARY rte_pmd_sfc_efx)
 find_library (dpdk_HASH_LIBRARY rte_hash)
 find_library (dpdk_CMDLINE_LIBRARY rte_cmdline)
 find_library (dpdk_MBUF_LIBRARY rte_mbuf)
@@ -53,23 +42,12 @@ include (FindPackageHandleStandardArgs)
 find_package_handle_standard_args (dpdk
   REQUIRED_VARS
     dpdk_INCLUDE_DIR
-    dpdk_PMD_VMXNET3_UIO_LIBRARY
+    dpdk_PMD_MLX5_LIBRARY
     dpdk_PMD_I40E_LIBRARY
-    dpdk_PMD_IXGBE_LIBRARY
-    dpdk_PMD_E1000_LIBRARY
-    dpdk_PMD_BNXT_LIBRARY
-    dpdk_PMD_RING_LIBRARY
-    dpdk_PMD_CXGBE_LIBRARY
-    dpdk_PMD_ENA_LIBRARY
-    dpdk_PMD_ENIC_LIBRARY
-    dpdk_PMD_FM10K_LIBRARY
-    dpdk_PMD_NFP_LIBRARY
-    dpdk_PMD_QEDE_LIBRARY
     dpdk_RING_LIBRARY
     dpdk_KVARGS_LIBRARY
     dpdk_MEMPOOL_LIBRARY
     dpdk_MEMPOOL_RING_LIBRARY
-    dpdk_PMD_SFC_EFX_LIBRARY
     dpdk_HASH_LIBRARY
     dpdk_CMDLINE_LIBRARY
     dpdk_MBUF_LIBRARY
@@ -88,18 +66,8 @@ if (dpdk_FOUND AND NOT (TARGET dpdk::dpdk))
     ${dpdk_EAL_LIBRARY}
     ${dpdk_MEMPOOL_LIBRARY}
     ${dpdk_MEMPOOL_RING_LIBRARY}
-    ${dpdk_PMD_BNXT_LIBRARY}
-    ${dpdk_PMD_E1000_LIBRARY}
-    ${dpdk_PMD_ENA_LIBRARY}
-    ${dpdk_PMD_ENIC_LIBRARY}
-    ${dpdk_PMD_FM10K_LIBRARY}
-    ${dpdk_PMD_QEDE_LIBRARY}
+    ${dpdk_PMD_MLX5_LIBRARY}
     ${dpdk_PMD_I40E_LIBRARY}
-    ${dpdk_PMD_IXGBE_LIBRARY}
-    ${dpdk_PMD_NFP_LIBRARY}
-    ${dpdk_PMD_RING_LIBRARY}
-    ${dpdk_PMD_SFC_EFX_LIBRARY}
-    ${dpdk_PMD_VMXNET3_UIO_LIBRARY}
     ${dpdk_RING_LIBRARY})
 
   add_library (_dpdk_common INTERFACE IMPORTED)
@@ -107,17 +75,6 @@ if (dpdk_FOUND AND NOT (TARGET dpdk::dpdk))
   set_target_properties (_dpdk_common
     PROPERTIES
       INTERFACE_COMPILE_OPTIONS -march=native)
-
-  #
-  # pmd_vmxnet3_uio
-  #
-
-  add_library (dpdk::pmd_vmxnet3_uio UNKNOWN IMPORTED)
-
-  set_target_properties (dpdk::pmd_vmxnet3_uio
-    PROPERTIES
-      IMPORTED_LOCATION ${dpdk_PMD_VMXNET3_UIO_LIBRARY}
-      INTERFACE_INCLUDE_DIRECTORIES ${dpdk_INCLUDE_DIR})
 
   #
   # pmd_i40e
@@ -132,134 +89,14 @@ if (dpdk_FOUND AND NOT (TARGET dpdk::dpdk))
       INTERFACE_INCLUDE_DIRECTORIES ${dpdk_INCLUDE_DIR})
 
   #
-  # pmd_ixgbe
+  # pmd_mlx5
   #
 
-  add_library (dpdk::pmd_ixgbe UNKNOWN IMPORTED)
+  add_library (dpdk::pmd_mlx5 UNKNOWN IMPORTED)
 
-  set_target_properties (dpdk::pmd_ixgbe
+  set_target_properties (dpdk::pmd_mlx5
     PROPERTIES
-      IMPORTED_LOCATION ${dpdk_PMD_IXGBE_LIBRARY}
-      INTERFACE_LINK_LIBRARIES _dpdk_common
-      INTERFACE_INCLUDE_DIRECTORIES ${dpdk_INCLUDE_DIR})
-
-  #
-  # pmd_e1000
-  #
-
-  add_library (dpdk::pmd_e1000 UNKNOWN IMPORTED)
-
-  set_target_properties (dpdk::pmd_e1000
-    PROPERTIES
-      IMPORTED_LOCATION ${dpdk_PMD_E1000_LIBRARY}
-      INTERFACE_LINK_LIBRARIES _dpdk_common
-      INTERFACE_INCLUDE_DIRECTORIES ${dpdk_INCLUDE_DIR})
-
-  #
-  # pmd_bnxt
-  #
-
-  add_library (dpdk::pmd_bnxt UNKNOWN IMPORTED)
-
-  set_target_properties (dpdk::pmd_bnxt
-    PROPERTIES
-      IMPORTED_LOCATION ${dpdk_PMD_BNXT_LIBRARY}
-      INTERFACE_LINK_LIBRARIES _dpdk_common
-      INTERFACE_INCLUDE_DIRECTORIES ${dpdk_INCLUDE_DIR})
-
-  #
-  # pmd_ring
-  #
-
-  add_library (dpdk::pmd_ring UNKNOWN IMPORTED)
-
-  set_target_properties (dpdk::pmd_ring
-    PROPERTIES
-      IMPORTED_LOCATION ${dpdk_PMD_RING_LIBRARY}
-      INTERFACE_LINK_LIBRARIES _dpdk_common
-      INTERFACE_INCLUDE_DIRECTORIES ${dpdk_INCLUDE_DIR})
-
-  #
-  # pmd_cxgbe
-  #
-
-  add_library (dpdk::pmd_cxgbe UNKNOWN IMPORTED)
-
-  set_target_properties (dpdk::pmd_cxgbe
-    PROPERTIES
-      IMPORTED_LOCATION ${dpdk_PMD_CXGBE_LIBRARY}
-      INTERFACE_LINK_LIBRARIES _dpdk_common
-      INTERFACE_INCLUDE_DIRECTORIES ${dpdk_INCLUDE_DIR})
-
-  #
-  # pmd_ena
-  #
-
-  add_library (dpdk::pmd_ena UNKNOWN IMPORTED)
-
-  set_target_properties (dpdk::pmd_ena
-    PROPERTIES
-      IMPORTED_LOCATION ${dpdk_PMD_ENA_LIBRARY}
-      INTERFACE_LINK_LIBRARIES _dpdk_common
-      INTERFACE_INCLUDE_DIRECTORIES ${dpdk_INCLUDE_DIR})
-
-  #
-  # pmd_enic
-  #
-
-  add_library (dpdk::pmd_enic UNKNOWN IMPORTED)
-
-  set_target_properties (dpdk::pmd_enic
-    PROPERTIES
-      IMPORTED_LOCATION ${dpdk_PMD_ENIC_LIBRARY}
-      INTERFACE_LINK_LIBRARIES _dpdk_common
-      INTERFACE_INCLUDE_DIRECTORIES ${dpdk_INCLUDE_DIR})
-
-  #
-  # pmd_fm10k
-  #
-
-  add_library (dpdk::pmd_fm10k UNKNOWN IMPORTED)
-
-  set_target_properties (dpdk::pmd_fm10k
-    PROPERTIES
-      IMPORTED_LOCATION ${dpdk_PMD_FM10K_LIBRARY}
-      INTERFACE_LINK_LIBRARIES _dpdk_common
-      INTERFACE_INCLUDE_DIRECTORIES ${dpdk_INCLUDE_DIR})
-
-  #
-  # pmd_nfp
-  #
-
-  add_library (dpdk::pmd_nfp UNKNOWN IMPORTED)
-
-  set_target_properties (dpdk::pmd_nfp
-    PROPERTIES
-      IMPORTED_LOCATION ${dpdk_PMD_NFP_LIBRARY}
-      INTERFACE_LINK_LIBRARIES _dpdk_common
-      INTERFACE_INCLUDE_DIRECTORIES ${dpdk_INCLUDE_DIR})
-
-  #
-  # pmd_qede
-  #
-
-  add_library (dpdk::pmd_qede UNKNOWN IMPORTED)
-
-  set_target_properties (dpdk::pmd_qede
-    PROPERTIES
-      IMPORTED_LOCATION ${dpdk_PMD_QEDE_LIBRARY}
-      INTERFACE_LINK_LIBRARIES _dpdk_common
-      INTERFACE_INCLUDE_DIRECTORIES ${dpdk_INCLUDE_DIR})
-
-  #
-  # pmd_sfc_efx
-  #
-
-  add_library (dpdk::pmd_sfc_efx UNKNOWN IMPORTED)
-
-  set_target_properties (dpdk::pmd_sfc_efx
-    PROPERTIES
-      IMPORTED_LOCATION ${dpdk_PMD_SFC_EFX_LIBRARY}
+      IMPORTED_LOCATION ${dpdk_PMD_MLX5_LIBRARY}
       INTERFACE_LINK_LIBRARIES _dpdk_common
       INTERFACE_INCLUDE_DIRECTORIES ${dpdk_INCLUDE_DIR})
 
@@ -401,19 +238,8 @@ if (dpdk_FOUND AND NOT (TARGET dpdk::dpdk))
     dpdk::mbuf
     dpdk::mempool
     dpdk::mempool_ring
-    dpdk::pmd_bnxt
-    dpdk::pmd_cxgbe
-    dpdk::pmd_e1000
-    dpdk::pmd_ena
-    dpdk::pmd_enic
-    dpdk::pmd_fm10k
-    dpdk::pmd_qede
     dpdk::pmd_i40e
-    dpdk::pmd_ixgbe
-    dpdk::pmd_nfp
-    dpdk::pmd_ring
-    dpdk::pmd_sfc_efx
-    dpdk::pmd_vmxnet3_uio
+    dpdk::pmd_mlx5
     dpdk::ring)
 
   set_target_properties (dpdk::dpdk

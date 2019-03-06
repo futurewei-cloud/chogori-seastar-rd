@@ -1147,43 +1147,14 @@ build_mbuf_cluster:
             printf("Creating Tx mbuf pool '%s' [%u mbufs] ...\n",
                    name.c_str(), mbufs_per_queue_tx);
            
-            if (HugetlbfsMemBackend) {
-                std::vector<phys_addr_t> mappings;
-
-                _xmem.reset(dpdk_qp::alloc_mempool_xmem(mbufs_per_queue_tx,
-                                                        inline_mbuf_size,
-                                                        mappings));
-                if (!_xmem.get()) {
-                    printf("Can't allocate a memory for Tx buffers\n");
-                    exit(1);
-                }
-
-                //
-                // We are going to push the buffers from the mempool into
-                // the circular_buffer and then poll them from there anyway, so
-                // we prefer to make a mempool non-atomic in this case.
-                //
-                _pool =
-                    rte_mempool_xmem_create(name.c_str(),
-                                       mbufs_per_queue_tx, inline_mbuf_size,
-                                       mbuf_cache_size,
-                                       sizeof(struct rte_pktmbuf_pool_private),
-                                       rte_pktmbuf_pool_init, nullptr,
-                                       rte_pktmbuf_init, nullptr,
-                                       rte_socket_id(), 0,
-                                       _xmem.get(), mappings.data(),
-                                       mappings.size(), page_bits);
-
-            } else {
-                _pool =
-                     rte_mempool_create(name.c_str(),
-                                       mbufs_per_queue_tx, inline_mbuf_size,
-                                       mbuf_cache_size,
-                                       sizeof(struct rte_pktmbuf_pool_private),
-                                       rte_pktmbuf_pool_init, nullptr,
-                                       rte_pktmbuf_init, nullptr,
-                                       rte_socket_id(), 0);
-            }
+             _pool =
+                  rte_mempool_create(name.c_str(),
+                                    mbufs_per_queue_tx, inline_mbuf_size,
+                                    mbuf_cache_size,
+                                    sizeof(struct rte_pktmbuf_pool_private),
+                                    rte_pktmbuf_pool_init, nullptr,
+                                    rte_pktmbuf_init, nullptr,
+                                    rte_socket_id(), 0);
 
             if (!_pool) {
                 printf("Failed to create mempool for Tx\n");
@@ -1400,28 +1371,6 @@ private:
     bool refill_one_cluster(rte_mbuf* head);
 
     /**
-     * Allocates a memory chunk to accommodate the given number of buffers of
-     * the given size and fills a vector with underlying physical pages.
-     *
-     * The chunk is going to be used as an external memory buffer of the DPDK
-     * memory pool (created using rte_mempool_xmem_create()).
-     *
-     * The chunk size if calculated using rte_mempool_xmem_size() function.
-     *
-     * @param num_bufs Number of buffers (in)
-     * @param buf_sz   Size of each buffer (in)
-     * @param mappings vector of physical pages (out)
-     *
-     * @note this function assumes that "mappings" is properly set and adds the
-     *       mappings to the back of the vector.
-     *
-     * @return a virtual address of the allocated memory chunk or nullptr in
-     *         case of a failure.
-     */
-    static void* alloc_mempool_xmem(uint16_t num_bufs, uint16_t buf_sz,
-                                    std::vector<phys_addr_t>& mappings);
-
-    /**
      * Polls for a burst of incoming packets. This function will not block and
      * will immediately return after processing all available packets.
      *
@@ -1475,7 +1424,7 @@ private:
 
 int dpdk_device::init_port_start()
 {
-    assert(_port_idx < rte_eth_dev_count());
+    assert(_port_idx < rte_eth_dev_count_avail());
 
     rte_eth_dev_info_get(_port_idx, &_dev_info);
 
@@ -1512,37 +1461,29 @@ int dpdk_device::init_port_start()
         _dev_info.max_rx_queues = std::min(_dev_info.max_rx_queues, (uint16_t)16);
     }
 
-    // Clear txq_flags - we want to support all available offload features
-    // except for multi-mempool and refcnt'ing which we don't need
-    _dev_info.default_txconf.txq_flags =
-        ETH_TXQ_FLAGS_NOMULTMEMP | ETH_TXQ_FLAGS_NOREFCOUNT;
-
     //
-    // Disable features that are not supported by port's HW
+    // Enable features that are supported by port's HW
     //
-    if (!(_dev_info.tx_offload_capa & DEV_TX_OFFLOAD_UDP_CKSUM)) {
-        _dev_info.default_txconf.txq_flags |= ETH_TXQ_FLAGS_NOXSUMUDP;
+    if ((_dev_info.tx_offload_capa & DEV_TX_OFFLOAD_UDP_CKSUM)) {
+        _dev_info.default_txconf.offloads |= DEV_TX_OFFLOAD_UDP_CKSUM;
     }
 
-    if (!(_dev_info.tx_offload_capa & DEV_TX_OFFLOAD_TCP_CKSUM)) {
-        _dev_info.default_txconf.txq_flags |= ETH_TXQ_FLAGS_NOXSUMTCP;
+    if ((_dev_info.tx_offload_capa & DEV_TX_OFFLOAD_TCP_CKSUM)) {
+        _dev_info.default_txconf.offloads |= DEV_TX_OFFLOAD_TCP_CKSUM;
     }
 
-    if (!(_dev_info.tx_offload_capa & DEV_TX_OFFLOAD_SCTP_CKSUM)) {
-        _dev_info.default_txconf.txq_flags |= ETH_TXQ_FLAGS_NOXSUMSCTP;
+    if ((_dev_info.tx_offload_capa & DEV_TX_OFFLOAD_SCTP_CKSUM)) {
+        _dev_info.default_txconf.offloads |= DEV_TX_OFFLOAD_SCTP_CKSUM;
     }
 
-    if (!(_dev_info.tx_offload_capa & DEV_TX_OFFLOAD_VLAN_INSERT)) {
-        _dev_info.default_txconf.txq_flags |= ETH_TXQ_FLAGS_NOVLANOFFL;
+    if ((_dev_info.tx_offload_capa & DEV_TX_OFFLOAD_VLAN_INSERT)) {
+        _dev_info.default_txconf.offloads |= DEV_TX_OFFLOAD_VLAN_INSERT;
     }
 
-    if (!(_dev_info.tx_offload_capa & DEV_TX_OFFLOAD_VLAN_INSERT)) {
-        _dev_info.default_txconf.txq_flags |= ETH_TXQ_FLAGS_NOVLANOFFL;
-    }
-
-    if (!(_dev_info.tx_offload_capa & DEV_TX_OFFLOAD_TCP_TSO) &&
-        !(_dev_info.tx_offload_capa & DEV_TX_OFFLOAD_UDP_TSO)) {
-        _dev_info.default_txconf.txq_flags |= ETH_TXQ_FLAGS_NOMULTSEGS;
+    if ((_dev_info.tx_offload_capa & DEV_TX_OFFLOAD_TCP_TSO) &&
+        (_dev_info.tx_offload_capa & DEV_TX_OFFLOAD_UDP_TSO)) {
+        _dev_info.default_txconf.offloads |= DEV_TX_OFFLOAD_TCP_TSO;
+        _dev_info.default_txconf.offloads |= DEV_TX_OFFLOAD_UDP_TSO;
     }
 
     /* for port configuration all features are off by default */
@@ -1603,17 +1544,14 @@ int dpdk_device::init_port_start()
 
     // Set Rx VLAN stripping
     if (_dev_info.rx_offload_capa & DEV_RX_OFFLOAD_VLAN_STRIP) {
-        port_conf.rxmode.hw_vlan_strip = 1;
+        port_conf.rxmode.offloads |= DEV_RX_OFFLOAD_VLAN_STRIP;
     }
-
-    // Enable HW CRC stripping
-    port_conf.rxmode.hw_strip_crc = 1;
 
 #ifdef RTE_ETHDEV_HAS_LRO_SUPPORT
     // Enable LRO
     if (_use_lro && (_dev_info.rx_offload_capa & DEV_RX_OFFLOAD_TCP_LRO)) {
         printf("LRO is on\n");
-        port_conf.rxmode.enable_lro = 1;
+        port_conf.rxmode.offloads |= DEV_RX_OFFLOAD_TCP_LRO;
         _hw_features.rx_lro = true;
     } else
 #endif
@@ -1635,7 +1573,7 @@ int dpdk_device::init_port_start()
           (_dev_info.rx_offload_capa & DEV_RX_OFFLOAD_UDP_CKSUM) &&
           (_dev_info.rx_offload_capa & DEV_RX_OFFLOAD_TCP_CKSUM)) {
         printf("RX checksum offload supported\n");
-        port_conf.rxmode.hw_ip_checksum = 1;
+        port_conf.rxmode.offloads |= DEV_RX_OFFLOAD_CHECKSUM;
         _hw_features.rx_csum_offload = 1;
     }
 
@@ -1765,39 +1703,6 @@ void dpdk_device::init_port_fini()
 }
 
 template <bool HugetlbfsMemBackend>
-void* dpdk_qp<HugetlbfsMemBackend>::alloc_mempool_xmem(
-    uint16_t num_bufs, uint16_t buf_sz, std::vector<phys_addr_t>& mappings)
-{
-    using namespace memory;
-    char* xmem;
-    struct rte_mempool_objsz mp_obj_sz = {};
-
-    rte_mempool_calc_obj_size(buf_sz, 0, &mp_obj_sz);
-
-    size_t xmem_size =
-        rte_mempool_xmem_size(num_bufs,
-                              mp_obj_sz.elt_size + mp_obj_sz.header_size +
-                                                   mp_obj_sz.trailer_size,
-                              page_bits);
-
-    // Aligning to 2M causes the further failure in small allocations.
-    // TODO: Check why - and fix.
-    if (posix_memalign((void**)&xmem, page_size, xmem_size)) {
-        printf("Can't allocate %ld bytes aligned to %ld\n",
-               xmem_size, page_size);
-        return nullptr;
-    }
-
-    for (size_t i = 0; i < xmem_size / page_size; ++i) {
-        translation tr = translate(xmem + i * page_size, page_size);
-        assert(tr.size);
-        mappings.push_back(tr.addr);
-    }
-
-    return xmem;
-}
-
-template <bool HugetlbfsMemBackend>
 bool dpdk_qp<HugetlbfsMemBackend>::init_rx_mbuf_pool()
 {
     using namespace memory;
@@ -1806,79 +1711,16 @@ bool dpdk_qp<HugetlbfsMemBackend>::init_rx_mbuf_pool()
     printf("Creating Rx mbuf pool '%s' [%u mbufs] ...\n",
            name.c_str(), mbufs_per_queue_rx);
 
-    //
-    // If we have a hugetlbfs memory backend we may perform a virt2phys
-    // translation and memory is "pinned". Therefore we may provide an external
-    // memory for DPDK pools and this way significantly reduce the memory needed
-    // for the DPDK in this case.
-    //
-    if (HugetlbfsMemBackend) {
-        std::vector<phys_addr_t> mappings;
-
-        _rx_xmem.reset(alloc_mempool_xmem(mbufs_per_queue_rx, mbuf_overhead,
-                                          mappings));
-        if (!_rx_xmem.get()) {
-            printf("Can't allocate a memory for Rx buffers\n");
-            return false;
-        }
-
-        //
-        // Don't pass single-producer/single-consumer flags to mbuf create as it
-        // seems faster to use a cache instead.
-        //
-        struct rte_pktmbuf_pool_private roomsz = {};
-        roomsz.mbuf_data_room_size = mbuf_data_size + RTE_PKTMBUF_HEADROOM;
-        _pktmbuf_pool_rx =
-                rte_mempool_xmem_create(name.c_str(),
-                                   mbufs_per_queue_rx, mbuf_overhead,
-                                   mbuf_cache_size,
-                                   sizeof(struct rte_pktmbuf_pool_private),
-                                   rte_pktmbuf_pool_init, as_cookie(roomsz),
-                                   rte_pktmbuf_init, nullptr,
-                                   rte_socket_id(), 0,
-                                   _rx_xmem.get(), mappings.data(),
-                                   mappings.size(),
-                                   page_bits);
-
-        // reserve the memory for Rx buffers containers
-        _rx_free_pkts.reserve(mbufs_per_queue_rx);
-        _rx_free_bufs.reserve(mbufs_per_queue_rx);
-
-        //
-        // 1) Pull all entries from the pool.
-        // 2) Bind data buffers to each of them.
-        // 3) Return them back to the pool.
-        //
-        for (int i = 0; i < mbufs_per_queue_rx; i++) {
-            rte_mbuf* m = rte_pktmbuf_alloc(_pktmbuf_pool_rx);
-            assert(m);
-            _rx_free_bufs.push_back(m);
-        }
-
-        for (auto&& m : _rx_free_bufs) {
-            if (!init_noninline_rx_mbuf(m)) {
-                printf("Failed to allocate data buffers for Rx ring. "
-                       "Consider increasing the amount of memory.\n");
-                exit(1);
-            }
-        }
-
-        rte_mempool_put_bulk(_pktmbuf_pool_rx, (void**)_rx_free_bufs.data(),
-                             _rx_free_bufs.size());
-
-        _rx_free_bufs.clear();
-    } else {
-        struct rte_pktmbuf_pool_private roomsz = {};
-        roomsz.mbuf_data_room_size = inline_mbuf_data_size + RTE_PKTMBUF_HEADROOM;
-        _pktmbuf_pool_rx =
-                rte_mempool_create(name.c_str(),
-                               mbufs_per_queue_rx, inline_mbuf_size,
-                               mbuf_cache_size,
-                               sizeof(struct rte_pktmbuf_pool_private),
-                               rte_pktmbuf_pool_init, as_cookie(roomsz),
-                               rte_pktmbuf_init, nullptr,
-                               rte_socket_id(), 0);
-    }
+    struct rte_pktmbuf_pool_private roomsz = {};
+    roomsz.mbuf_data_room_size = inline_mbuf_data_size + RTE_PKTMBUF_HEADROOM;
+    _pktmbuf_pool_rx =
+            rte_mempool_create(name.c_str(),
+                           mbufs_per_queue_rx, inline_mbuf_size,
+                           mbuf_cache_size,
+                           sizeof(struct rte_pktmbuf_pool_private),
+                           rte_pktmbuf_pool_init, as_cookie(roomsz),
+                           rte_pktmbuf_init, nullptr,
+                           rte_socket_id(), 0);
 
     return _pktmbuf_pool_rx != nullptr;
 }
@@ -2161,9 +2003,9 @@ void dpdk_qp<HugetlbfsMemBackend>::process_packets(
         nr_frags += m->nb_segs;
         bytes    += m->pkt_len;
 
-        // Set stipped VLAN value if available
+        // Set stripped VLAN value if available
         if ((_dev->_dev_info.rx_offload_capa & DEV_RX_OFFLOAD_VLAN_STRIP) &&
-            (m->ol_flags & PKT_RX_VLAN_PKT)) {
+            (m->ol_flags & PKT_RX_VLAN_STRIPPED)) {
 
             oi.vlan_tci = m->vlan_tci;
         }
@@ -2278,10 +2120,10 @@ std::unique_ptr<net::device> create_dpdk_net_device(
     called = true;
 
     // Check that we have at least one DPDK-able port
-    if (rte_eth_dev_count() == 0) {
+    if (rte_eth_dev_count_avail() == 0) {
         rte_exit(EXIT_FAILURE, "No Ethernet ports - bye\n");
     } else {
-        printf("ports number: %d\n", rte_eth_dev_count());
+        printf("ports number: %d\n", rte_eth_dev_count_avail());
     }
 
     return std::make_unique<dpdk::dpdk_device>(port_idx, num_queues, use_lro,

@@ -11,7 +11,7 @@ build: configure
 
 configure: submodule
 	@echo ">>> Configuring"
-	@cd ../ && ./configure.py --mode=release --prefix=$(INSTALL_PFX)
+	@cd ../ && ./configure.py --enable-dpdk --mode=release --prefix=$(INSTALL_PFX)
 
 submodule:
 	@echo ">>> Fetching submodules"

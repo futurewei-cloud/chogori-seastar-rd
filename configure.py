@@ -170,7 +170,8 @@ def configure_mode(mode):
     ]
 
     # Generate a new build by pointing to the source directory.
-    ARGS = seastar_cmake.COOKING_BASIC_ARGS + (['-i', 'dpdk'] if args.dpdk else []) + ['-d', BUILD_PATH, '--'] + TRANSLATED_ARGS
+    # ARGS = seastar_cmake.COOKING_BASIC_ARGS + (['-i', 'dpdk'] if args.dpdk else []) + ['-d', BUILD_PATH, '--'] + TRANSLATED_ARGS
+    ARGS = seastar_cmake.COOKING_BASIC_ARGS + ['-d', BUILD_PATH, '--'] + TRANSLATED_ARGS
     print(ARGS)
     distutils.dir_util.mkpath(BUILD_PATH)
     subprocess.check_call(ARGS, shell=False, cwd=seastar_cmake.ROOT_PATH)
