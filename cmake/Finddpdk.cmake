@@ -74,7 +74,7 @@ if (dpdk_FOUND AND NOT (TARGET dpdk::dpdk))
 
   set_target_properties (_dpdk_common
     PROPERTIES
-      INTERFACE_COMPILE_OPTIONS -march=native)
+      INTERFACE_COMPILE_OPTIONS "-mtune=skylake-avx512;-mavx;-mxsave;-mbmi;-maes;-mpopcnt")
 
   #
   # pmd_i40e
