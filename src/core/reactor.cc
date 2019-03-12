@@ -124,6 +124,8 @@
 
 namespace seastar {
 
+static void register_network_stacks();
+
 struct mountpoint_params {
     std::string mountpoint = "none";
     uint64_t read_bytes_rate = std::numeric_limits<uint64_t>::max();
@@ -4683,6 +4685,8 @@ network_stack_registry::create(sstring name, options opts) {
 
 boost::program_options::options_description
 reactor::get_options_description(std::chrono::duration<double> default_task_quota) {
+    register_network_stacks();
+
     namespace bpo = boost::program_options;
     bpo::options_description opts("Core options");
     auto net_stack_names = network_stack_registry::list();
@@ -5045,7 +5049,6 @@ static void register_network_stacks() {
 
 void smp::configure(boost::program_options::variables_map configuration)
 {
-    register_network_stacks();
 #ifndef SEASTAR_NO_EXCEPTION_HACK
     if (configuration["enable-glibc-exception-scaling-workaround"].as<bool>()) {
         init_phdr_cache();
