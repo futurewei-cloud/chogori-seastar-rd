@@ -244,7 +244,6 @@ find_package (Concepts)
 find_package (GnuTLS 3.3.26 REQUIRED)
 find_package (LinuxMembarrier)
 find_package (Protobuf 2.5.0 REQUIRED)
-find_package (Sanitizers)
 find_package (StdAtomic REQUIRED)
 set (StdFilesystem_CXX_DIALECT ${Seastar_CXX_DIALECT})
 find_package (StdFilesystem REQUIRED)
@@ -596,16 +595,8 @@ if (Seastar_COMPRESS_DEBUG)
   list (APPEND Seastar_DEVELOPMENT_FLAGS -gz)
 endif()
 
-if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-  if (NOT Sanitizers_FOUND)
-    message (FATAL_ERROR "Sanitizers are required for debug mode!")
-  endif ()
-endif ()
-
 target_link_libraries (seastar
   PUBLIC
-    debug Sanitizers::address
-    debug Sanitizers::undefined_behavior
     Boost::boost
     Boost::program_options
     Boost::thread
@@ -668,10 +659,6 @@ endif ()
 if (Seastar_STD_OPTIONAL_VARIANT_STRINGVIEW)
   target_compile_definitions (seastar
     PUBLIC SEASTAR_USE_STD_OPTIONAL_VARIANT_STRINGVIEW)
-endif ()
-
-if (Sanitizers_FIBER_SUPPORT)
-  list (APPEND Seastar_DEVELOPMENT_DEFINES SEASTAR_HAVE_ASAN_FIBER_SUPPORT)
 endif ()
 
 if (Seastar_ALLOC_PAGE_SIZE)
@@ -748,7 +735,6 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
       SEASTAR_DEBUG
       SEASTAR_DEFAULT_ALLOCATOR
       SEASTAR_DEBUG_SHARED_PTR
-      SEASTAR_ASAN_ENABLED
       SEASTAR_SHUFFLE_TASK_QUEUE
       SEASTAR_THREAD_STACK_GUARDS)
 endif ()
@@ -966,7 +952,6 @@ if (Seastar_INSTALL)
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindGnuTLS.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindLinuxMembarrier.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindProtobuf.cmake
-      ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindSanitizers.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindStdAtomic.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindStdFilesystem.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Findc-ares.cmake

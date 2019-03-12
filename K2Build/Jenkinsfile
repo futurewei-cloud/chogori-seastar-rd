@@ -73,5 +73,63 @@ pipeline {
                 sh "curl http://k2-bvu-10001.huawei.com:10080/incoming/ --upload-file libseastar-k2_*.changes"
             }
         }
+        stage('Clean') {
+            options { skipDefaultCheckout() }
+            agent {label "builder"}
+            steps {
+                echo "\u2600 Cleaning"
+                sh "./K2Build/k2build make -C K2Build clean"
+            }
+        }
+        stage('Configure Debug') {
+            options { skipDefaultCheckout() }
+            agent {label "builder"}
+            steps {
+                echo "\u2600 Building"
+                sh "./K2Build/k2build make -C K2Build configure-dbg"
+            }
+        }
+        stage('Build Debug') {
+            options { skipDefaultCheckout() }
+            agent {label "builder"}
+            steps {
+                echo "\u2600 Building"
+                sh "./K2Build/k2build make -C K2Build build-dbg"
+            }
+        }
+        stage('Install Debug') {
+            options { skipDefaultCheckout() }
+            agent {label "builder"}
+            steps {
+                echo "\u2600 Building"
+                sh "./K2Build/k2build make -C K2Build install-dbg"
+            }
+        }
+        stage('Test Debug') {
+            options { skipDefaultCheckout() }
+            agent {label "builder"}
+            steps {
+                echo "\u2600 Test"
+                sh "./K2Build/k2build make -C K2Build test-dbg"
+            }
+        }
+        stage('Package Debug') {
+            options { skipDefaultCheckout() }
+            agent {label "builder"}
+            steps {
+                echo "\u2600 Test"
+                sh "./K2Build/k2build make -C K2Build package-dbg"
+            }
+        }
+        stage('Upload Debug artifacts') {
+            options { skipDefaultCheckout() }
+            agent {label "builder"}
+            steps {
+                echo "\u2600 Uploading artifacts"
+                sh "curl http://k2-bvu-10001.huawei.com:10080/incoming/ --upload-file libseastar-dbg-k2_*.deb"
+                sh "curl http://k2-bvu-10001.huawei.com:10080/incoming/ --upload-file libseastar-dbg-k2_*.changes"
+            }
+        }
+
     }
 }
