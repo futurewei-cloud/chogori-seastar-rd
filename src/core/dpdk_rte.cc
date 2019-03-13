@@ -43,7 +43,10 @@ void eal::init(cpuset cpus, boost::program_options::variables_map opts)
     std::vector<std::vector<char>> args {
         string2vector(opts["argv0"].as<std::string>()),
         string2vector("-c"), string2vector(mask.str()),
-        string2vector("-n"), string2vector("1")
+        string2vector("--no-hpet"),
+        // TODO get these from configuration
+        string2vector("-n"), string2vector("4"),
+        string2vector("-d"), string2vector("librte_pmd_mlx5.so")
     };
 
     compat::optional<std::string> hugepages_path;

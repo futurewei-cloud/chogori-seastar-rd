@@ -6,7 +6,7 @@ all: build
 INSTALL_PFX=install/usr/local
 BUILD_DIR=build/release
 DEBUG_DIR=build/debug
-DEPEND_FLAGS=--depends libfmt-k2 -d libdpdk-k2-dev -d libboost-all-dev -d liblz4-dev -d libgnutls28-dev -d libprotobuf-dev -d libyaml-cpp-dev -d libc-ares-dev -d libcrypto++-dev -d libsctp-dev -d libunistring-dev
+DEPEND_FLAGS=--depends libfmt-k2 -d libdpdk-k2-dev=0.3.1 -d libboost-all-dev -d liblz4-dev -d libgnutls28-dev -d libprotobuf-dev -d libyaml-cpp-dev -d libc-ares-dev -d libcrypto++-dev -d libsctp-dev -d libunistring-dev
 
 build: configure
 	@echo ">>> Building"
