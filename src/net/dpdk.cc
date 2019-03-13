@@ -1581,12 +1581,14 @@ int dpdk_device::init_port_start()
     if ((_dev_info.tx_offload_capa & DEV_TX_OFFLOAD_IPV4_CKSUM)) {
         printf("TX ip checksum offload supported\n");
         _hw_features.tx_csum_ip_offload = 1;
+        port_conf.txmode.offloads |= DEV_TX_OFFLOAD_IPV4_CKSUM;
     }
 
     // TSO is supported starting from DPDK v1.8
     if (_dev_info.tx_offload_capa & DEV_TX_OFFLOAD_TCP_TSO) {
         printf("TSO is supported\n");
         _hw_features.tx_tso = 1;
+        port_conf.txmode.offloads |= DEV_TX_OFFLOAD_TCP_TSO;
     }
 
     // There is no UFO support in the PMDs yet.
@@ -1610,6 +1612,7 @@ int dpdk_device::init_port_start()
           (_dev_info.tx_offload_capa & DEV_TX_OFFLOAD_TCP_CKSUM)) {
         printf("TX TCP&UDP checksum offload supported\n");
         _hw_features.tx_csum_l4_offload = 1;
+        port_conf.txmode.offloads |= DEV_TX_OFFLOAD_UDP_CKSUM | DEV_TX_OFFLOAD_TCP_CKSUM;
     }
 
     int retval;
