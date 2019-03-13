@@ -245,12 +245,12 @@ public:
 
 
     void start() {
-        _len = rte_eth_xstats_get_names(_port_id, NULL, 0);
-        _xstats = new rte_eth_xstat[_len];
-        _xstat_names = new rte_eth_xstat_name[_len];
-        update_xstats();
-        update_xstat_names();
-        update_offsets();
+        //_len = rte_eth_xstats_get_names(_port_id, NULL, 0);
+        //_xstats = new rte_eth_xstat[_len];
+        //_xstat_names = new rte_eth_xstat_name[_len];
+        //update_xstats();
+        //update_xstat_names();
+        //update_offsets();
     }
 
     void update_xstats() {
@@ -259,11 +259,12 @@ public:
     }
 
     uint64_t get_value(const xstat_id id) {
-        auto off = _offsets[static_cast<int>(id)];
-        if (off == -1) {
-            return 0;
-        }
-        return _xstats[off].value;
+        return 0; 
+        //auto off = _offsets[static_cast<int>(id)];
+        //if (off == -1) {
+        //    return 0;
+        //}
+        //return _xstats[off].value;
     }
 
 private:
