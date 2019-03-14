@@ -1462,6 +1462,9 @@ int dpdk_device::init_port_start()
         _dev_info.max_rx_queues = std::min(_dev_info.max_rx_queues, (uint16_t)16);
     }
 
+    /* for port configuration all features are off by default */
+    rte_eth_conf port_conf = { 0 };
+
     //
     // Enable features that are supported by port's HW
     //
@@ -1474,11 +1477,15 @@ int dpdk_device::init_port_start()
     }
 
     if ((_dev_info.tx_offload_capa & DEV_TX_OFFLOAD_SCTP_CKSUM)) {
+        printf("SCTP CKSUM offload supported\n");
         _dev_info.default_txconf.offloads |= DEV_TX_OFFLOAD_SCTP_CKSUM;
+        port_conf.txmode.offloads |= DEV_TX_OFFLOAD_SCTP_CKSUM;
     }
 
     if ((_dev_info.tx_offload_capa & DEV_TX_OFFLOAD_VLAN_INSERT)) {
+        printf("VLAN insert offload supported\n");
         _dev_info.default_txconf.offloads |= DEV_TX_OFFLOAD_VLAN_INSERT;
+        port_conf.txmode.offloads |= DEV_TX_OFFLOAD_VLAN_INSERT;
     }
 
     if ((_dev_info.tx_offload_capa & DEV_TX_OFFLOAD_TCP_TSO) &&
@@ -1486,9 +1493,6 @@ int dpdk_device::init_port_start()
         _dev_info.default_txconf.offloads |= DEV_TX_OFFLOAD_TCP_TSO;
         _dev_info.default_txconf.offloads |= DEV_TX_OFFLOAD_UDP_TSO;
     }
-
-    /* for port configuration all features are off by default */
-    rte_eth_conf port_conf = { 0 };
 
     printf("Port %d: max_rx_queues %d max_tx_queues %d\n",
            _port_idx, _dev_info.max_rx_queues, _dev_info.max_tx_queues);
