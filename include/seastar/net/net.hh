@@ -277,20 +277,20 @@ public:
         return hash % hw_queues_count();
     }
     void set_local_queue(std::unique_ptr<qp> dev);
-    template <typename Func>
-    unsigned forward_dst(unsigned src_cpuid, Func&& hashfn) {
+
+    virtual unsigned forward_dst(unsigned src_cpuid, uint32_t hash) {
         auto& qp = queue_for_cpu(src_cpuid);
         if (!qp._sw_reta) {
             return src_cpuid;
         }
-        auto hash = hashfn() >> _rss_table_bits;
+        auto hash_bits = hash >> _rss_table_bits;
         auto& reta = *qp._sw_reta;
-        return reta[hash % reta.size()];
+        return reta[hash_bits % reta.size()];
     }
     virtual unsigned hash2cpu(uint32_t hash) {
         // there is an assumption here that qid == cpu_id which will
         // not necessary be true in the future
-        return forward_dst(hash2qid(hash), [hash] { return hash; });
+        return forward_dst(hash2qid(hash), hash);
     }
 };
 

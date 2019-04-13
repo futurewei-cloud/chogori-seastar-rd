@@ -39,6 +39,7 @@
 #include <seastar/util/std-compat.hh>
 #include <boost/preprocessor.hpp>
 #include <seastar/net/ip.hh>
+#include <seastar/net/net.hh>
 #include <seastar/net/const.hh>
 #include <seastar/core/dpdk_rte.hh>
 #include <seastar/net/dpdk.hh>
@@ -55,6 +56,8 @@
 #include <rte_ethdev.h>
 #include <rte_cycles.h>
 #include <rte_memzone.h>
+#include <rte_tcp.h>
+#include <rte_ip.h>
 
 #if RTE_VERSION <= RTE_VERSION_NUM(2,0,0,16)
 
@@ -87,6 +90,7 @@ namespace seastar {
 
 namespace dpdk {
 
+
 /******************* Net device related constatns *****************************/
 static constexpr uint16_t default_ring_size      = 512;
 
@@ -107,23 +111,14 @@ static constexpr uint16_t mbuf_cache_size        = 512;
 static constexpr uint16_t mbuf_overhead          =
                                  sizeof(struct rte_mbuf) + RTE_PKTMBUF_HEADROOM;
 //
-// We'll allocate 2K data buffers for an inline case because this would require
-// a single page per mbuf. If we used 4K data buffers here it would require 2
-// pages for a single buffer (due to "mbuf_overhead") and this is a much more
-// demanding memory constraint.
+// SeaStar requires this to be a power of 2, so 8KB instead of 9000 bytes.
+// The rx buffers are allocated based on the inline_mbuf_data_size, so 
+// it needs to be 8KB as well.
 //
 static constexpr size_t   inline_mbuf_data_size  = 2048;
-
-//
-// Size of the data buffer in the non-inline case.
-//
-// We may want to change (increase) this value in future, while the
-// inline_mbuf_data_size value will unlikely change due to reasons described
-// above.
-//
 static constexpr size_t   mbuf_data_size         = 2048;
 
-// (INLINE_MBUF_DATA_SIZE(2K)*32 = 64K = Max TSO/LRO size) + 1 mbuf for headers
+// (INLINE_MBUF_DATA_SIZE(8K)*32 = 64K = Max TSO/LRO size) + 1 mbuf for headers
 static constexpr uint8_t  max_frags              = 32 + 1;
 
 //
@@ -496,6 +491,11 @@ public:
 
     const rte_eth_txconf* def_tx_conf() const {
         return &_dev_info.default_txconf;
+    }
+
+    unsigned forward_dst(unsigned src_cpuid, uint32_t hash) override {
+        auto hash_bits = hash >> _rss_table_bits;
+        return _redir_table[hash_bits % _redir_table.size()];
     }
 
     /**
@@ -1279,7 +1279,9 @@ public:
 
     dpdk_device& port() const { return *_dev; }
     tx_buf* get_tx_buf() { return _tx_buf_factory.get(); }
+
 private:
+    uint32_t calculate_rss_hash(struct rte_mbuf* buf);
 
     template <class Func>
     uint32_t _send(circular_buffer<packet>& pb, Func packet_to_tx_buf_p) {
@@ -1505,24 +1507,26 @@ int dpdk_device::init_port_start()
     // Set RSS mode: enable RSS if seastar is configured with more than 1 CPU.
     // Even if port has a single queue we still want the RSS feature to be
     // available in order to make HW calculate RSS hash for us.
-    if (smp::count > 1) {
-        if (_dev_info.hash_key_size == 40) {
-            _rss_key = default_rsskey_40bytes;
-        } else if (_dev_info.hash_key_size == 52) {
-            _rss_key = default_rsskey_52bytes;
-        } else if (_dev_info.hash_key_size != 0) {
-            // WTF?!!
-            rte_exit(EXIT_FAILURE,
-                "Port %d: We support only 40 or 52 bytes RSS hash keys, %d bytes key requested",
-                _port_idx, _dev_info.hash_key_size);
-        } else {
-            _rss_key = default_rsskey_40bytes;
-            _dev_info.hash_key_size = 40;
-        }
+    if (_dev_info.hash_key_size == 40) {
+        _rss_key = default_rsskey_40bytes;
+    } else if (_dev_info.hash_key_size == 52) {
+        _rss_key = default_rsskey_52bytes;
+    } else if (_dev_info.hash_key_size != 0) {
+        // WTF?!!
+        rte_exit(EXIT_FAILURE,
+            "Port %d: We support only 40 or 52 bytes RSS hash keys, %d bytes key requested",
+            _port_idx, _dev_info.hash_key_size);
+    } else {
+        _rss_key = default_rsskey_40bytes;
+        _dev_info.hash_key_size = 40;
+    }
 
+    if (smp::count > 1) {
         port_conf.rxmode.mq_mode = ETH_MQ_RX_RSS;
-        port_conf.rx_adv_conf.rss_conf.rss_hf = ETH_RSS_PROTO_MASK;
+        // Mellanox does not support RSS on SCTP
+        port_conf.rx_adv_conf.rss_conf.rss_hf = ETH_RSS_UDP | ETH_RSS_TCP | ETH_RSS_IP;
         if (_dev_info.hash_key_size) {
+            printf("Setting rss_key in port_conf\n");
             port_conf.rx_adv_conf.rss_conf.rss_key = const_cast<uint8_t *>(_rss_key.data());
             port_conf.rx_adv_conf.rss_conf.rss_key_len = _dev_info.hash_key_size;
         }
@@ -1990,6 +1994,37 @@ bool dpdk_qp<HugetlbfsMemBackend>::rx_gc()
 }
 
 
+// Mellanox NICs do not calculate the RSS hash to spec, so
+// re-calculate it here to match what SeaStar expects. At the 
+// next level of processing SeaStar will use the hash to forward
+// to the CPU it expects.
+template <bool HugetlbfsMemBackend>
+uint32_t dpdk_qp<HugetlbfsMemBackend>::calculate_rss_hash(struct rte_mbuf* buf)
+{
+   if(!(buf->packet_type & RTE_PTYPE_L4_TCP) && !(buf->packet_type & RTE_PTYPE_L4_UDP)) {
+      return 0;
+   }
+
+   forward_hash data;
+   struct ether_hdr* ethHdr = rte_pktmbuf_mtod(buf, struct ether_hdr*);
+
+   struct ipv4_hdr* ipHdr = reinterpret_cast<struct ipv4_hdr *>(ethHdr + 1);
+   data.push_back(ipHdr->src_addr);
+   data.push_back(ipHdr->dst_addr);
+
+   if (buf->packet_type & RTE_PTYPE_L4_TCP) {
+      struct tcp_hdr* tcpHdr = reinterpret_cast<struct tcp_hdr *>(ipHdr+1);
+      data.push_back(tcpHdr->src_port);
+      data.push_back(tcpHdr->dst_port);
+   } else {
+      struct udp_hdr* udpHdr = reinterpret_cast<struct udp_hdr *>(ipHdr+1);
+      data.push_back(udpHdr->src_port);
+      data.push_back(udpHdr->dst_port);
+   }
+
+   return toeplitz_hash(_dev->rss_key(), data);
+}
+
 template <bool HugetlbfsMemBackend>
 void dpdk_qp<HugetlbfsMemBackend>::process_packets(
     struct rte_mbuf **bufs, uint16_t count)
@@ -1999,6 +2034,9 @@ void dpdk_qp<HugetlbfsMemBackend>::process_packets(
     for (uint16_t i = 0; i < count; i++) {
         struct rte_mbuf *m = bufs[i];
         offload_info oi;
+
+        // Should be before from_mbuf is called
+        uint32_t hash = calculate_rss_hash(m);
 
         compat::optional<packet> p = from_mbuf(m);
 
@@ -2030,9 +2068,7 @@ void dpdk_qp<HugetlbfsMemBackend>::process_packets(
         }
 
         (*p).set_offload_info(oi);
-        if (m->ol_flags & PKT_RX_RSS_HASH) {
-            (*p).set_rss_hash(m->hash.rss);
-        }
+        (*p).set_rss_hash(hash);
 
         _dev->l2receive(std::move(*p));
     }
@@ -2158,7 +2194,7 @@ get_dpdk_net_options_description()
 
     opts.add_options()
         ("hw-fc",
-                boost::program_options::value<std::string>()->default_value("on"),
+                boost::program_options::value<std::string>()->default_value("off"),
                 "Enable HW Flow Control (on / off)");
 #if 0
     opts.add_options()

@@ -318,18 +318,19 @@ future<> interface::dispatch_packet(packet p) {
         auto i = _proto_map.find(ntoh(eh->eth_proto));
         if (i != _proto_map.end()) {
             l3_rx_stream& l3 = i->second;
-            auto fw = _dev->forward_dst(engine().cpu_id(), [&p, &l3, this] () {
-                auto hwrss = p.rss_hash();
-                if (hwrss) {
-                    return hwrss.value();
-                } else {
-                    forward_hash data;
-                    if (l3.forward(data, p, sizeof(eth_hdr))) {
-                        return toeplitz_hash(rss_key(), data);
-                    }
-                    return 0u;
+
+            uint32_t hash = 0;
+            auto hwrss = p.rss_hash();
+            if (hwrss) {
+                hash = hwrss.value();
+            } else {
+                forward_hash data;
+                if (l3.forward(data, p, sizeof(eth_hdr))) {
+                    hash = toeplitz_hash(rss_key(), data);
                 }
-            });
+            }
+
+            auto fw = _dev->forward_dst(engine().cpu_id(), hash);
             if (fw != engine().cpu_id()) {
                 forward(fw, std::move(p));
             } else {

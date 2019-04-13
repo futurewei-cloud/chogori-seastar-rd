@@ -436,7 +436,7 @@ private:
         future<> send(packet p);
         void connect();
         packet read();
-        void close();
+        future<> close();
         void remove_from_tcbs() {
             auto id = connid{_local_ip, _foreign_ip, _local_port, _foreign_port};
             _tcp._tcbs.erase(id);
@@ -702,7 +702,7 @@ public:
         }
         void shutdown_connect();
         void close_read();
-        void close_write();
+        future<> close_write();
     };
     class listener {
         tcp& _tcp;
@@ -1802,12 +1802,12 @@ future<> tcp<InetTraits>::tcb::send(packet p) {
 }
 
 template <typename InetTraits>
-void tcp<InetTraits>::tcb::close() {
+future<> tcp<InetTraits>::tcb::close() {
     if (in_state(CLOSED) || _snd.closed) {
-        return;
+        return make_ready_future();
     }
-    // TODO: We should return a future to upper layer
-    wait_for_all_data_acked().then([this, zis = this->shared_from_this()] () mutable {
+
+    return wait_for_all_data_acked().then([this, zis = this->shared_from_this()] () mutable {
         _snd.closed = true;
         tcp_debug("close: unsent_len=%d\n", _snd.unsent_len);
         if (in_state(CLOSE_WAIT)) {
@@ -2098,8 +2098,8 @@ void tcp<InetTraits>::connection::close_read() {
 }
 
 template <typename InetTraits>
-void tcp<InetTraits>::connection::close_write() {
-    _tcb->close();
+future<> tcp<InetTraits>::connection::close_write() {
+    return _tcb->close();
 }
 
 template <typename InetTraits>

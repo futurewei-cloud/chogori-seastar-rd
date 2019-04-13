@@ -156,8 +156,7 @@ public:
         });
     }
     future<> close() override {
-        _conn->close_write();
-        return make_ready_future<>();
+        return _conn->close_write();
     }
 };
 
@@ -174,8 +173,7 @@ public:
         return _conn->send(std::move(p));
     }
     virtual future<> close() override {
-        _conn->close_write();
-        return make_ready_future<>();
+        return _conn->close_write();
     }
 };
 

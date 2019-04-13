@@ -57,8 +57,8 @@ void eal::init(cpuset cpus, boost::program_options::variables_map opts)
     // If "hugepages" is not provided and DPDK PMD drivers mode is requested -
     // use the default DPDK huge tables configuration.
     if (hugepages_path) {
-        args.push_back(string2vector("--huge-dir"));
-        args.push_back(string2vector(hugepages_path.value()));
+        //args.push_back(string2vector("--huge-dir"));
+        //args.push_back(string2vector(hugepages_path.value()));
 
         //
         // We don't know what is going to be our networking configuration so we
