@@ -1303,16 +1303,17 @@ private:
                                          _tx_burst.data() + _tx_burst_idx,
                                          _tx_burst.size() - _tx_burst_idx);
 
-        uint64_t nr_frags = 0, bytes = 0;
+        //uint64_t nr_frags = 0, bytes = 0;
 
         for (int i = 0; i < sent; i++) {
-            rte_mbuf* m = _tx_burst[_tx_burst_idx + i];
-            bytes    += m->pkt_len;
-            nr_frags += m->nb_segs;
+            //rte_eth_tx_burst will free the mbuf, so this isn't safe
+            //rte_mbuf* m = _tx_burst[_tx_burst_idx + i];
+            //bytes    += m->pkt_len;
+            //nr_frags += m->nb_segs;
             pb.pop_front();
         }
 
-        _stats.tx.good.update_frags_stats(nr_frags, bytes);
+        //_stats.tx.good.update_frags_stats(nr_frags, bytes);
 
         _tx_burst_idx += sent;
 
