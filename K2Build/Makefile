@@ -12,17 +12,9 @@ build: configure
 	@echo ">>> Building"
 	@cd ../ && ninja -C $(BUILD_DIR)
 
-build-dbg: configure-dbg
-	@echo ">>> Building"
-	@cd ../ && ninja -C $(DEBUG_DIR)
-
 configure: submodule
 	@echo ">>> Configuring"
 	@cd ../ && ./configure.py --enable-dpdk --mode=release --prefix=$(INSTALL_PFX)
-
-configure-dbg: submodule
-	@echo ">>> Configuring"
-	@cd ../ && ./configure.py --enable-dpdk --mode=debug --prefix=$(INSTALL_PFX)
 
 submodule:
 	@echo ">>> Fetching submodules"
@@ -32,17 +24,9 @@ test: build
 	@echo ">>> Testing"
 	@cd ../ && ninja -C $(BUILD_DIR) test
 
-test-dbg: build-dbg
-	@echo ">>> Testing"
-	@cd ../ && ninja -C $(DEBUG_DIR) test
-
 install: build
 	@echo ">>> Installing"
 	@cd ../ && ninja -C $(BUILD_DIR) install
-
-install-dbg: build-dbg
-	@echo ">>> Installing"
-	@cd ../ && ninja -C $(DEBUG_DIR) install
 
 clean:
 	@echo ">>> Cleaning"
@@ -55,10 +39,6 @@ clean:
 package: install
 	@echo ">>> Packaging"
 	@cd ../ && fpm $(DEPEND_FLAGS) -s dir -t deb --deb-generate-changes -n libseastar-k2 -f -m k2 -a amd64 -v $(package_version) --deb-dist stable --description "Seastar k2 package http://rnd-github-usa-g.huawei.com/SeattleCloudBU/DFV_K2_SeaStar/" -C $(BUILD_DIR)/install
-
-package-dbg: install-dbg
-	@echo ">>> Packaging"
-	@cd ../ && fpm $(DEPEND_FLAGS) -s dir -t deb --deb-generate-changes -n libseastar-dbg-k2 -f -m k2 -a amd64 -v $(package_version) --deb-dist stable --description "Seastar debug k2 package http://rnd-github-usa-g.huawei.com/SeattleCloudBU/DFV_K2_SeaStar/" -C $(DEBUG_DIR)/install
 
 builder_img_build:
 	@$(MAKE) -C Builder
