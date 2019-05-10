@@ -883,7 +883,7 @@ bool cpu_pages::initialize() {
     if (r == MAP_FAILED) {
         abort();
     }
-    ::madvise(base, size, MADV_HUGEPAGE);
+
     pages = reinterpret_cast<page*>(base);
     memory = base;
     nr_pages = size / page_size;
@@ -909,16 +909,11 @@ allocate_anonymous_memory(compat::optional<void*> where, size_t how_much) {
 }
 
 mmap_area
-allocate_hugetlbfs_memory(file_desc& fd, compat::optional<void*> where, size_t how_much) {
-    auto pos = fd.size();
-    fd.truncate(pos + how_much);
-    auto ret = fd.map(
+allocate_hugetlbfs_memory(compat::optional<void*> where, size_t how_much) {
+    return mmap_anonymous(where.value_or(nullptr),
             how_much,
             PROT_READ | PROT_WRITE,
-            MAP_SHARED | MAP_POPULATE | (where ? MAP_FIXED : 0),
-            pos,
-            where.value_or(nullptr));
-    return ret;
+            MAP_PRIVATE | MAP_POPULATE | MAP_HUGETLB | MAP_HUGE_2MB | (where ? MAP_FIXED : 0));
 }
 
 void cpu_pages::replace_memory_backing(allocate_system_memory_fn alloc_sys_mem) {
@@ -977,7 +972,6 @@ void cpu_pages::do_resize(size_t new_size, allocate_system_memory_fn alloc_sys_m
     auto mmap_size = new_size - old_size;
     auto mem = alloc_sys_mem({mmap_start}, mmap_size);
     mem.release();
-    ::madvise(mmap_start, mmap_size, MADV_HUGEPAGE);
     // one past last page structure is a sentinel
     auto new_page_array_pages = align_up(sizeof(page[new_pages + 1]), page_size) / page_size;
     auto new_page_array
