@@ -131,6 +131,9 @@ void register_network_stack(sstring name, boost::program_options::options_descri
 
 class thread_pool;
 class smp;
+namespace rdma {
+class RDMAStack;
+}
 
 class smp_message_queue {
     static constexpr size_t queue_length = 128;
@@ -460,6 +463,7 @@ private:
     /// otherwise. This function should be used by a handler to return early if a task appears.
     idle_cpu_handler _idle_cpu_handler{ [] (work_waiting_on_reactor) {return idle_cpu_handler_result::no_more_work;} };
     std::unique_ptr<network_stack> _network_stack;
+    std::unique_ptr<rdma::RDMAStack> _rdma_stack;
     // _lowres_clock_impl will only be created on cpu 0
     std::unique_ptr<lowres_clock_impl> _lowres_clock_impl;
     lowres_clock::time_point _lowres_next_timeout;
@@ -842,6 +846,8 @@ public:
     static void arrive_at_event_loop_end();
     static void join_all();
     static bool main_thread() { return std::this_thread::get_id() == _tmain; }
+
+    static bool _using_rdma;
 
     /// Runs a function on a remote core.
     ///

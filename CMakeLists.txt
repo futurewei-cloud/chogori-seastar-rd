@@ -455,6 +455,7 @@ add_library (seastar STATIC
   include/seastar/net/dhcp.hh
   include/seastar/net/dns.hh
   include/seastar/net/dpdk.hh
+  include/seastar/net/rdma.hh
   include/seastar/net/ethernet.hh
   include/seastar/net/inet_address.hh
   include/seastar/net/ip.hh
@@ -543,6 +544,7 @@ add_library (seastar STATIC
   src/net/dhcp.cc
   src/net/dns.cc
   src/net/dpdk.cc
+  src/net/rdma.cc
   src/net/ethernet.cc
   src/net/inet_address.cc
   src/net/ip.cc

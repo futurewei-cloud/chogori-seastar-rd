@@ -73,6 +73,9 @@ static constexpr size_t huge_page_size =
 #error "Huge page size is not defined for this architecture"
 #endif
 
+char* getMemRegionStart();
+size_t getMemRegionSize();
+
 void configure(std::vector<resource::memory> m, bool mbind,
         compat::optional<std::string> hugetlbfs_path = {});
 

@@ -32,6 +32,7 @@
 #include <seastar/core/memory.hh>
 #include <seastar/core/posix.hh>
 #include <seastar/net/packet.hh>
+#include <seastar/net/rdma.hh>
 #include <seastar/net/stack.hh>
 #include <seastar/net/posix-stack.hh>
 #include <seastar/net/native-stack.hh>
@@ -4045,6 +4046,11 @@ int reactor::run() {
        _signals.handle_signal_once(SIGTERM, [this] { stop(); });
     }
 
+    if (smp::_using_rdma) {
+        _rdma_stack = rdma::RDMAStack::makeRDMAStack(memory::getMemRegionStart(), memory::getMemRegionSize());
+        assert(_rdma_stack);
+    }
+
     _cpu_started.wait(smp::count).then([this] {
         _network_stack->initialize().then([this] {
             _start_promise.set_value();
@@ -4700,6 +4706,7 @@ reactor::get_options_description(std::chrono::duration<double> default_task_quot
                 "idle polling time in microseconds (reduce for overprovisioned environments or laptops)")
         ("poll-aio", bpo::value<bool>()->default_value(true),
                 "busy-poll for disk I/O (reduces latency and increases throughput)")
+        ("rdma", "Enable the rdma network stack")
         ("task-quota-ms", bpo::value<double>()->default_value(default_task_quota / 1ms), "Max time (ms) between polls")
         ("max-task-backlog", bpo::value<unsigned>()->default_value(1000), "Maximum number of task backlog to allow; above this we ignore I/O")
         ("blocked-reactor-notify-ms", bpo::value<unsigned>()->default_value(2000), "threshold in miliseconds over which the reactor is considered blocked if no progress is made")
@@ -4773,6 +4780,7 @@ std::unique_ptr<smp_message_queue*[], smp::qs_deleter> smp::_qs;
 std::thread::id smp::_tmain;
 unsigned smp::count = 1;
 bool smp::_using_dpdk;
+bool smp::_using_rdma;
 
 void smp::start_all_queues()
 {
@@ -5074,6 +5082,7 @@ void smp::configure(boost::program_options::variables_map configuration)
 #ifdef SEASTAR_HAVE_DPDK
     _using_dpdk = configuration.count("dpdk-pmd");
 #endif
+    _using_rdma = configuration.count("rdma");
     auto thread_affinity = configuration["thread-affinity"].as<bool>();
     if (configuration.count("overprovisioned")
            && configuration["thread-affinity"].defaulted()) {
@@ -5201,6 +5210,10 @@ void smp::configure(boost::program_options::variables_map configuration)
         dpdk::eal::init(cpus, configuration);
     }
 #endif
+
+    if (smp::_using_rdma) {
+        rdma::initRDMAContext();
+    }
 
     // Better to put it into the smp class, but at smp construction time
     // correct smp::count is not known.

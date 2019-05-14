@@ -108,6 +108,7 @@ disable_abort_on_alloc_failure_temporarily::~disable_abort_on_alloc_failure_temp
 #include <cstring>
 #include <boost/intrusive/list.hpp>
 #include <sys/mman.h>
+#include <linux/mman.h>
 #include <seastar/util/defer.hh>
 #include <seastar/util/backtrace.hh>
 
@@ -456,6 +457,14 @@ struct cpu_pages {
 static thread_local cpu_pages cpu_mem;
 std::atomic<unsigned> cpu_pages::cpu_id_gen;
 cpu_pages* cpu_pages::all_cpus[max_cpus];
+
+char* getMemRegionStart() {
+    return cpu_mem.memory;
+}
+
+size_t getMemRegionSize() {
+    return cpu_mem.nr_pages * page_size;
+}
 
 void set_heap_profiling_enabled(bool enable) {
     bool is_enabled = cpu_mem.collect_backtrace;
@@ -1345,8 +1354,8 @@ void configure(std::vector<resource::memory> m, bool mbind,
         // std::function is copyable, but file_desc is not, so we must use
         // a shared_ptr to allow sys_alloc to be copied around
         auto fdp = make_lw_shared<file_desc>(file_desc::temporary(*hugetlbfs_path));
-        sys_alloc = [fdp] (optional<void*> where, size_t how_much) {
-            return allocate_hugetlbfs_memory(*fdp, where, how_much);
+        sys_alloc = [] (optional<void*> where, size_t how_much) {
+            return allocate_hugetlbfs_memory(where, how_much);
         };
         cpu_mem.replace_memory_backing(sys_alloc);
     }

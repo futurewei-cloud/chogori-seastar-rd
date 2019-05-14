@@ -1,4 +1,5 @@
 #include <iostream>
+#include <algorithm>
 
 #include <seastar/net/rdma.hh>
 
@@ -45,91 +46,124 @@ int initRDMAContext() {
     return 0;
 }
 
-int sendUDQPMessage(char* data, int size, struct ibv_ah* AH, uint32_t destQP) {
-    if (size + 40 > UDQPRxSize) {
+struct ibv_ah* RDMAStack::makeAH(const union ibv_gid& GID) {
+    struct ibv_ah_attr AHAttr;
+    memset(&AHAttr, 0, sizeof(struct ibv_ah_attr));
+    memcpy(AHAttr.grh.dgid.raw, GID.raw, 16);
+    AHAttr.grh.sgid_index = 1; // Index 1 is ROCEv2 address
+    AHAttr.grh.hop_limit = 64; // Equivalent to IPv4 time to live
+    AHAttr.is_global = 1; // Means use GID
+    // For ConnectX-4 EN, we have one port per RDMA device, which starts at "1"
+    AHAttr.port_num = 1;
+
+    struct ibv_ah* AH = ibv_create_ah(protectionDomain, &AHAttr);
+    if (!AH) {
+        // TODO
+        std::cerr << "Failed to create AH" << std::endl;
+        return nullptr;
+    }
+
+    AHLookup[GID] = AH;
+    return AH;
+}
+
+int RDMAStack::sendUDQPMessage(temporary_buffer<uint8_t> buffer, const union ibv_gid& destGID, uint32_t destQP) {
+    if (buffer.size() + 40 > UDQPRxSize) {  
         std::cerr << "Message too large, max size is: " << UDQPRxSize-40 << std::endl;
         assert(false);
         return -1;
     }
 
-    if (trySendUDQPMessage(data, size, AH, destQP)) {
-        UDQPSendQueue.emplace_back(data, size);
+    auto AHIt = AHLookup.find(destGID);
+    struct ibv_ah* AH = nullptr;
+    if (AHIt == AHLookup.end()) {
+        // TODO move to slow core
+        AH = makeAH(destGID);
+    } else {
+        AH = AHIt->second;
+    }
+
+    int idx = trySendUDQPMessage(buffer, AH, destQP);
+    if (idx < 0) {
+        UDSendQueue.emplace_back(std::move(buffer), AH, destQP);
+    } else {
+        UDOutstandingBuffers[idx] = std::move(buffer);
     }
 
     return 0;
 }
 
-int RDMAStack::trySendUDQPMessage(char* data, int size, struct ibv_ah* AH, uint32_t destQP) {
-    if (UDQPSRs.postedCount == SRData::maxWR) {
+int RDMAStack::trySendUDQPMessage(const temporary_buffer<uint8_t>& buffer, struct ibv_ah* AH, uint32_t destQP) {
+    if (UDQPSRs.postedCount == SendWRData::maxWR) {
         return -1;
     }
 
-    int idx = (UDQPSRs.postedIdx + UDQPSRs.postedCount) % SRData::maxWR;
+    int idx = (UDQPSRs.postedIdx + UDQPSRs.postedCount) % SendWRData::maxWR;
     struct ibv_sge* SG = &(UDQPSRs.Segments[idx]);
 
-    SG->addr = (uint64_t)data;
-    SG->length = size;
+    SG->addr = (uint64_t)buffer.get();
+    SG->length = buffer.size();
 
     struct ibv_send_wr* SR = &(UDQPSRs.SendRequests[idx]);
     // We are relying that some of the SR parameters are initialized
     // once and not changed
-    SR.next = nullptr;
-    SR.sg_list = SG;
+    SR->next = nullptr;
+    SR->sg_list = SG;
 
-    // AH creation takes ~100usec, needs to be on slow core
-    SR.wr.ud.ah = AH;
-    SR.wr.ud.remote_qpn = destQP;
+    SR->wr.ud.ah = AH;
+    SR->wr.ud.remote_qpn = destQP;
 
-    if (UDQPSRs.postedCount == SRData::signalThershold) {
-        SR.send_flags = IBV_SEND_SIGNALED;
+    if (UDQPSRs.postedCount == SendWRData::signalThreshold) {
+        SR->send_flags = IBV_SEND_SIGNALED;
     } else {
-        SR.send_flags = 0;
+        SR->send_flags = 0;
     }
 
     struct ibv_send_wr* badSR;
-    if (ibv_post_send(controlQP, SR, &badSR)) {
+    if (ibv_post_send(UDQP, SR, &badSR)) {
         std::cerr << "Failed to send" << std::endl;
         return -1;
     } else {
         UDQPSRs.postedCount++;
-        return 0;
+        return idx;
     }
 }
 
 bool RDMAStack::processUDSendQueue() {
-    if (UDSendQueue.size() == 0 || UDQPSRs.postedCount == SRData::maxWR) {
+    if (UDSendQueue.size() == 0 || UDQPSRs.postedCount == SendWRData::maxWR) {
         return false;
     }
 
-    int toProcess = std::min(UDSendQueue.size(), SRData::maxWR - UDQPSRs.postedCount);
-    int idx = (UDQPSRs.postedIdx + UDQPSRs.postedCount) % SRData::maxWR;
+    int toProcess = std::min((int)UDSendQueue.size(), (int)(SendWRData::maxWR - UDQPSRs.postedCount));
+    int idx = (UDQPSRs.postedIdx + UDQPSRs.postedCount) % SendWRData::maxWR;
     int baseIdx = idx;
     struct ibv_send_wr* firstSR = &(UDQPSRs.SendRequests[idx]);
 
-    for(int i=0; i < toProcess; ++i, idx = (baseIdx + i) % SRData::maxWR) {
+    for(int i=0; i < toProcess; ++i, idx = (baseIdx + i) % SendWRData::maxWR) {
         UDSend& sendData = UDSendQueue[i];
         struct ibv_sge* SG = &(UDQPSRs.Segments[idx]);
         struct ibv_send_wr* SR = &(UDQPSRs.SendRequests[idx]);
 
-        SG->addr = (uint64_t)sendData.data;
-        SG->length = sendData.size;
-        SR.wr.ud.ah = sendData.AH;
-        SR.wr.ud.remote_qpn = sendData.destQP;
-        SR.sg_list = SG;
+        SG->addr = (uint64_t)sendData.buffer.get();
+        SG->length = sendData.buffer.size();
+        SR->wr.ud.ah = sendData.AH;
+        SR->wr.ud.remote_qpn = sendData.destQP;
+        SR->sg_list = SG;
 
         if (i == toProcess - 1) {
-            SR.next = nullptr;
-            if (toProcess >= SRData::signalThreshold) {
-                SR.send_flags = IBV_SEND_SIGNALED;
+            SR->next = nullptr;
+            // TODO
+            if (toProcess >= SendWRData::signalThreshold) {
+                SR->send_flags = IBV_SEND_SIGNALED;
             }
         } else {
-            SR.next = &(UDQPSRs.SendRequests[(baseIdx+i+1)%SRData::maxWR]);
-            SR.send_flags = 0;
+            SR->next = &(UDQPSRs.SendRequests[(baseIdx+i+1)%SendWRData::maxWR]);
+            SR->send_flags = 0;
         }
     }
 
     struct ibv_send_wr* badSR;
-    if (ibv_post_send(controlQP, firstSR, &badSR)) {
+    if (ibv_post_send(UDQP, firstSR, &badSR)) {
         std::cerr << "Failed to send" << std::endl;
         return false;
     }
@@ -137,16 +171,16 @@ bool RDMAStack::processUDSendQueue() {
     UDQPSRs.postedCount += toProcess;
     UDSendQueue.erase(UDSendQueue.cbegin(), UDSendQueue.cbegin()+toProcess);
     return true;
-}
+} 
 
 void RDMAStack::freeUDSRs(uint64_t signaledID) {
-    int freed=0;
-    for (int i=UDQPSRs.postedIdx; i<=signaledID; ++i, ++freed) {
+    uint32_t freed=0;
+    for (int i=UDQPSRs.postedIdx; i<=(int)signaledID; ++i, ++freed) {
         struct ibv_sge* SG = &(UDQPSRs.Segments[i]);
         free((void*)SG->addr);
     }
 
-    UDQPSRs.postedIdx = (UDQPSRs.postedIdx + freed) % SRData::maxWR;
+    UDQPSRs.postedIdx = (UDQPSRs.postedIdx + freed) % SendWRData::maxWR;
     assert(freed <= UDQPSRs.postedCount);
     UDQPSRs.postedCount -= freed;
 }
@@ -162,7 +196,7 @@ bool RDMAStack::processUDCQ() {
 
     for (int i=0; i<completed; ++i) {
         if (WCs[i].opcode == IBV_WC_SEND) {
-            freeSRs(WCs[i].wr_id);
+            freeUDSRs(WCs[i].wr_id);
             if (WCs[i].status != IBV_WC_SUCCESS) {
                 std::cerr << "error on send wc" << std::endl;
             }
@@ -183,13 +217,13 @@ bool RDMAStack::poller() {
 }
 
 void RDMAStack::registerPoller() {
-    poller = reactor::poller::simple([&] { return poller(); });
+    RDMAPoller = reactor::poller::simple([&] { return poller(); });
 }
 
-static std::unique_ptr<RDMAStack> RDMAStack::makeControlQP(std::unique_ptr<RDMAStack> stack) {
+std::unique_ptr<RDMAStack> RDMAStack::makeUDQP(std::unique_ptr<RDMAStack> stack) {
     // Step 1. Create a CQ
-    stack->UDCQ = ibv_create_cq(ctx, WRData::maxWR*2, nullptr, nullptr, 0);
-    if (!stack->UDCQ) {
+    stack->UDCQ = ibv_create_cq(ctx, RecvWRData::maxWR+SendWRData::maxWR, nullptr, nullptr, 0);
+    if (!stack->UDCQ) { 
         std::cerr << "failed to create UDCQ" << std::endl;
         return std::unique_ptr<RDMAStack>(nullptr);
     }
@@ -200,15 +234,15 @@ static std::unique_ptr<RDMAStack> RDMAStack::makeControlQP(std::unique_ptr<RDMAS
         .send_cq = stack->UDCQ,
         .recv_cq = stack->UDCQ,
         .cap = {
-            .max_send_wr = WRData::maxWR,
-            .max_recv_wr = WRData::maxWR,
+            .max_send_wr = SendWRData::maxWR,
+            .max_recv_wr = RecvWRData::maxWR,
             .max_send_sge = 1,
             .max_recv_sge = 1,
             .max_inline_data = 0}, // TODO optimizations for inline data
         .qp_type = IBV_QPT_UD,
         .sq_sig_all = 0
     };
-    stack->UDQP = ibv_create_qp(stack->pd, &initAttr);
+    stack->UDQP = ibv_create_qp(stack->protectionDomain, &initAttr);
     if (!stack->UDQP) {
         std::cout << "failed to create UDQP" << std::endl;
         return std::unique_ptr<RDMAStack>(nullptr);
@@ -219,7 +253,7 @@ static std::unique_ptr<RDMAStack> RDMAStack::makeControlQP(std::unique_ptr<RDMAS
     memset(&attr, 0, sizeof(ibv_qp_attr));
     attr.qp_state = IBV_QPS_INIT;
     attr.port_num = 1;
-    if (ibv_modify_qp(stack->controlQP, &attr, IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_QKEY)) {
+    if (ibv_modify_qp(stack->UDQP, &attr, IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_QKEY)) {
         std::cerr << "failed to transition into init state" << std::endl;
         return std::unique_ptr<RDMAStack>(nullptr);
     }
@@ -237,12 +271,12 @@ static std::unique_ptr<RDMAStack> RDMAStack::makeControlQP(std::unique_ptr<RDMAS
         }
         SG.addr = (uint64_t)malloc(UDQPRxSize);
         SG.length = UDQPRxSize;
-        SG.lkey = stack->mr->lkey;
+        SG.lkey = stack->memRegionHandle->lkey;
         RR.sg_list = &SG;
         RR.num_sge = 1;
     } 
     struct ibv_recv_wr* badRR;
-    if (ibv_post_recv(stack->UDQP, UDQPRRs.RecvRequests, &badRR)) {
+    if (ibv_post_recv(stack->UDQP, stack->UDQPRRs.RecvRequests, &badRR)) {
         std::cerr << "failed to post RRs" << std::endl;
         return std::unique_ptr<RDMAStack>(nullptr);
     }
@@ -250,18 +284,18 @@ static std::unique_ptr<RDMAStack> RDMAStack::makeControlQP(std::unique_ptr<RDMAS
     // Step 5. Transition QP into ready-to-receive (RTR) state
     memset(&attr, 0, sizeof(ibv_qp_attr));
     attr.qp_state = IBV_QPS_RTR;
-    if (ibv_modify_qp(driver->controlQP, &attr, IBV_QP_STATE)) {
+    if (ibv_modify_qp(stack->UDQP, &attr, IBV_QP_STATE)) {
         std::cerr << "failed to transition into RTR" << std::endl;
-        return std::unique_ptr<RDMADriver>(nullptr);
+        return std::unique_ptr<RDMAStack>(nullptr);
     }
 
     // Step 6. Transition QP into ready-to-send (RTS) state
     memset(&attr, 0, sizeof(ibv_qp_attr));
     attr.qp_state = IBV_QPS_RTS;
     attr.sq_psn = 0;
-    if (ibv_modify_qp(driver->controlQP, &attr, IBV_QP_STATE | IBV_QP_SQ_PSN)) {
+    if (ibv_modify_qp(stack->UDQP, &attr, IBV_QP_STATE | IBV_QP_SQ_PSN)) {
         std::cerr << "failed to transition into RTS" << std::endl;
-        return std::unique_ptr<RDMADriver>(nullptr);
+        return std::unique_ptr<RDMAStack>(nullptr);
     }
 
     // Step 7. Prep Send WRs
@@ -274,26 +308,26 @@ static std::unique_ptr<RDMAStack> RDMAStack::makeControlQP(std::unique_ptr<RDMAS
         SR.wr.ud.remote_qkey = 0;
     }
 
-    std::cout << "Control QP num: " << driver->controlQP->qp_num << std::endl;
+    std::cout << "Control QP num: " << stack->UDQP->qp_num << std::endl;
 
-    return driver;
+    return stack;
 }
 
-static std::unique_ptr<RDMAStack> RDMAStack::makeRDMAStack(void* memRegion, size_t memRegionSize) {
+std::unique_ptr<RDMAStack> RDMAStack::makeRDMAStack(void* memRegion, size_t memRegionSize) {
     assert(initialized);
 
     std::unique_ptr<RDMAStack> stack = std::make_unique<RDMAStack>();
 
-    stack->pd = ibv_alloc_pd(ctx);
-    if (!stack->pd) {
+    stack->protectionDomain = ibv_alloc_pd(ctx);
+    if (!stack->protectionDomain) {
         std::cerr << "ibv_alloc_pd failed" << std::endl;
         return std::unique_ptr<RDMAStack>(nullptr);
     }
 
-    stack->mr = ibv_reg_mr(stack->pd, memRegion, memRegionSize, IBV_ACCESS_LOCAL_WRITE);
-    if (!stack->mr) {
+    stack->memRegionHandle = ibv_reg_mr(stack->protectionDomain, memRegion, memRegionSize, IBV_ACCESS_LOCAL_WRITE);
+    if (!stack->memRegionHandle) {
         std::cerr << "failed to register memory" << std::endl;
-        return std::unique_ptr<RDMADriver>(nullptr);
+        return std::unique_ptr<RDMAStack>(nullptr);
     }
 
     //Port 1 index 1 should be our ROCEv2 gid
@@ -304,7 +338,7 @@ static std::unique_ptr<RDMAStack> RDMAStack::makeRDMAStack(void* memRegion, size
         return stack;
     }
 
-    driver->registerPoller();
+    stack->registerPoller();
     //TODO expose our GID and UDQP
     
     return stack;
