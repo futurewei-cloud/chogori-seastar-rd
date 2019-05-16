@@ -53,8 +53,8 @@ void RDMAConnection::handshakeRequest(uint32_t remoteQP) {
 
 void RDMAConnection::handshakeResponse(uint32_t remoteQP) {
     // TODO move this part to slow core
-    struct ibv_ah_attr;
-    memset(&(driver->AHAttr), 0, sizeof(struct ibv_ah_attr));
+    struct ibv_ah_attr AHAttr;
+    memset(&AHAttr, 0, sizeof(struct ibv_ah_attr));
     memcpy(AHAttr.grh.dgid.raw, remote.GID.raw, 16);
     AHAttr.grh.sgid_index = 1; // Index 1 is ROCEv2 address
     AHAttr.grh.hop_limit = 64; // Equivalent to IPv4 time to live
@@ -95,7 +95,7 @@ void RDMAConnection::handshakeResponse(uint32_t remoteQP) {
 
 
     isReady = true;
-    processSends<std::deque>(sendQueue);
+    processSends<std::deque<temporary_buffer<uint8_t>>>(sendQueue);
 }
 
 template <class VecType>
@@ -114,8 +114,8 @@ bool RDMAConnection::processSends(VecType& queue) {
         struct ibv_sge* SG = &(SendWRs.Segments[idx]);
         struct ibv_send_wr* SR = &(SendWRs.SendRequests[idx]);
 
-        SG->addr = (uint64_t)sendData.buffer.get();
-        SG->length = sendData.buffer.size();
+        SG->addr = (uint64_t)sendData.get();
+        SG->length = sendData.size();
         SR->sg_list = SG;
 
         if ((idx+1) % SendWRData::signalThreshold == 0) {
@@ -148,28 +148,29 @@ bool RDMAConnection::processSends(VecType& queue) {
 future<temporary_buffer<uint8_t>&&> RDMAConnection::recv() {
     // TODO check for connection error state and return exception if needed
     if (recvPromiseActive) {
-        return make_exception_future<>();
+        // TODO exception types
+        return make_exception_future<temporary_buffer<uint8_t>&&>(std::system_error(-1, std::system_category()));
     }
 
     if (recvQueue.size()) {
         temporary_buffer<uint8_t> buf = std::move(recvQueue.front());
         recvQueue.pop_front();
-        return make_ready_future<>(std::move(buf));
+        return make_ready_future<temporary_buffer<uint8_t>&&>(std::move(buf));
     }
 
-    recvPromise = promise<>();
+    recvPromise = promise<temporary_buffer<uint8_t>&&>();
     recvPromiseActive = true;
     return recvPromise.get_future();
 }
 
-void send(std::vector<temporary_buffer<uint8_t>>&& buf) {
+void RDMAConnection::send(std::vector<temporary_buffer<uint8_t>>&& buf) {
     if (!isReady || sendQueue.size()) {
         sendQueue.insert(sendQueue.end(), std::make_move_iterator(buf.begin()), 
                          std::make_move_iterator(buf.end()));
         return;
     }
 
-    processSends<std::vector>(buf);
+    processSends<std::vector<temporary_buffer<uint8_t>>>(buf);
     if (buf.size()) {
         sendQueue.insert(sendQueue.end(), std::make_move_iterator(buf.begin()), 
                          std::make_move_iterator(buf.end()));
@@ -380,17 +381,18 @@ void RDMAStack::freeUDSRs(uint64_t signaledID) {
 
 future<RDMAConnection> RDMAStack::accept() {
     if (acceptPromiseActive) {
-        return make_exception_future<>();
+        // TODO exception types
+        return make_exception_future<RDMAConnection>(std::system_error(-1, std::system_category()));
     }
 
     if (acceptQueue.size()) {
         RDMAConnection conn = std::move(acceptQueue.back());
         acceptQueue.pop_back();
-        return make_ready_future<>(std::move(conn));
+        return make_ready_future<RDMAConnection>(std::move(conn));
     }
 
     acceptPromiseActive = true;
-    acceptPromise = promise<>();
+    acceptPromise = promise<RDMAConnection>();
     return acceptPromise.get_future();
 }
 
@@ -445,8 +447,8 @@ bool RDMAStack::processUDCQ() {
             if (WCs[i].status != IBV_WC_SUCCESS) {
                 std::cerr << "error on UD recv wc" << std::endl;
             } else {
-                UDMessage* message = (UDMessage*)(UDQPRRs.Segments[idx].data+40);
-                struct ibv_grh* grh = UDQPRRs.Segments[idx].data;
+                UDMessage* message = (UDMessage*)(UDQPRRs.Segments[idx].addr+40);
+                struct ibv_grh* grh = (struct ibv_grh*)UDQPRRs.Segments[idx].addr;
                 processUDMessage(message, EndPoint(grh->sgid, WCs[i].src_qp));
             }
 

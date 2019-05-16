@@ -8,12 +8,15 @@
 #include <seastar/core/temporary_buffer.hh>
 #include <seastar/core/reactor.hh>
 #include <seastar/core/future.hh>
+#include <seastar/core/weak_ptr.hh>
 
 #include <infiniband/verbs.h>
 
 bool operator==(const union ibv_gid& lhs, const union ibv_gid& rhs) {
     return (memcmp(lhs.raw, rhs.raw, 16) == 0);
 }
+
+namespace seastar { namespace rdma { class EndPoint; }}
 
 namespace std {
 
@@ -27,12 +30,19 @@ struct hash<union ibv_gid>
         return std::hash<unsigned long long>{}((unsigned long long)(half1 ^ half2));
     }
 };
-    
+
+template <>
+struct hash<seastar::rdma::EndPoint> {
+    std::size_t operator()(const seastar::rdma::EndPoint&) const;
+};
+   
 }
 
 
 namespace seastar {
 namespace rdma {
+
+class RDMAStack;
 
 int initRDMAContext();
 
@@ -68,26 +78,25 @@ struct EndPoint {
     uint32_t UDQP;
     EndPoint(union ibv_gid gid, uint32_t qp) :
         GID(gid), UDQP(qp) {}
-    bool operator==(const EndPoint& lhs, const EndPoint& rhs) {
-        return (lhs.GID == rhs.GID) && (lhs.UDQP == rhs.UDQP);
+    bool operator==(const EndPoint& rhs) const {
+        return (GID == rhs.GID) && (UDQP == rhs.UDQP);
     }
 };
 
-class RDMAConnection : weakly_referencable<RDMAConnection> {
+class RDMAConnection : public weakly_referencable<RDMAConnection> {
 public:
     future<temporary_buffer<uint8_t>&&> recv();
     void send(std::vector<temporary_buffer<uint8_t>>&& buf);
 
     RDMAConnection(RDMAStack* stack, EndPoint remote) : 
         stack(stack), remote(remote) {}
-    ~RDMAConnection();
-    RDMAConnection(RDMAConnection&&) = default;
-    RDMAConnection& operator=(RDMAConnection&&) = default;
+    ~RDMAConnection() noexcept;
+    RDMAConnection(RDMAConnection&&) noexcept;
+    RDMAConnection& operator=(RDMAConnection&&) noexcept;
 private:
     bool isReady = false;
-    deque<temporary_buffer<uint8_t>> recvQueue;
-    deque<temporary_buffer<uint8_t>> sendQueue;
-    EndPoint remote;
+    std::deque<temporary_buffer<uint8_t>> recvQueue;
+    std::deque<temporary_buffer<uint8_t>> sendQueue;
 
     SendWRData SendWRs;
     std::array<temporary_buffer<uint8_t>, SendWRData::maxWR> outstandingBuffers;
@@ -96,13 +105,17 @@ private:
 
     struct ibv_qp* QP;
     RDMAStack* stack;
+    EndPoint remote;
 
     bool recvPromiseActive = false;
     promise<temporary_buffer<uint8_t>&&> recvPromise;
 
     void handshakeResponse(uint32_t remoteQP);
+    void handshakeRequest(uint32_t remoteQP);
 
     RDMAConnection() = delete;
+
+    friend class RDMAStack;
 };
 
 class RDMAStack {
@@ -114,7 +127,7 @@ public:
 
     static std::unique_ptr<RDMAStack> makeRDMAStack(void* memRegion, size_t memRegionSize);
     RDMAStack() = default;
-    ~RDMAStack();
+    ~RDMAStack() noexcept;
 
     bool poller();
 private:
@@ -132,7 +145,7 @@ private:
     };
     struct UDMessage {
         UDOps op;
-        uint32_t RemoteQP;
+        uint32_t remoteQP;
     };
     // There is a 40 byte overhead for UD
     static constexpr size_t UDQPRxSize = sizeof(UDMessage) + 40;
@@ -148,6 +161,7 @@ private:
     int sendUDQPMessage(temporary_buffer<uint8_t> buffer, const union ibv_gid& GID, uint32_t destQP);
     int trySendUDQPMessage(const temporary_buffer<uint8_t>& buffer, struct ibv_ah* AH, uint32_t destQP);
 
+    void processUDMessage(UDMessage*, EndPoint);
     bool processUDSendQueue();
     bool processUDCQ();
     void freeUDSRs(uint64_t WRID);
@@ -159,21 +173,16 @@ private:
 
     //TODO move to slow core
     struct ibv_ah* makeAH(const union ibv_gid& GID);
+
+    friend class RDMAConnection;
 };
 
 } // namespace rdma
 } // namespace seastar
 
-namespace std {
 
-template <>
-struct hash<EndPoint>
-{
-    // TODO investigate smarter hash algorithms
-    std::size_t operator()(const EndPoint& endpoint) const {
-        return std::hash{}(endpoint.GID) ^ std::hash{}(endpoint.UDQP);
-    }
-};
-    
+// TODO investigate smarter hash algorithms
+std::size_t std::hash<seastar::rdma::EndPoint>::operator()(const seastar::rdma::EndPoint& endpoint) const {
+    return std::hash<union ibv_gid>{}(endpoint.GID) ^ std::hash<uint32_t>{}(endpoint.UDQP);
 }
-
+    
