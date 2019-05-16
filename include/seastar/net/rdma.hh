@@ -12,9 +12,7 @@
 
 #include <infiniband/verbs.h>
 
-bool operator==(const union ibv_gid& lhs, const union ibv_gid& rhs) {
-    return (memcmp(lhs.raw, rhs.raw, 16) == 0);
-}
+bool operator==(const union ibv_gid& lhs, const union ibv_gid& rhs);
 
 namespace seastar { namespace rdma { class EndPoint; }}
 
@@ -37,7 +35,6 @@ struct hash<seastar::rdma::EndPoint> {
 };
    
 }
-
 
 namespace seastar {
 namespace rdma {
@@ -62,6 +59,10 @@ struct SendWRData {
     struct ibv_sge Segments[maxWR];
     uint32_t postedIdx = 0;
     uint32_t postedCount = 0;
+
+    SendWRData() = default;
+    SendWRData(SendWRData&&) = default;
+    SendWRData& operator=(SendWRData&&) = default;
 };
 
 struct UDSend {
@@ -78,6 +79,7 @@ struct EndPoint {
     uint32_t UDQP;
     EndPoint(union ibv_gid gid, uint32_t qp) :
         GID(gid), UDQP(qp) {}
+    EndPoint() = default;
     bool operator==(const EndPoint& rhs) const {
         return (GID == rhs.GID) && (UDQP == rhs.UDQP);
     }
@@ -103,8 +105,8 @@ private:
     template <class VecType>
     bool processSends(VecType& queue);
 
-    struct ibv_qp* QP;
-    RDMAStack* stack;
+    struct ibv_qp* QP = nullptr;
+    RDMAStack* stack = nullptr;
     EndPoint remote;
 
     bool recvPromiseActive = false;
@@ -136,8 +138,6 @@ private:
     struct ibv_mr* memRegionHandle = nullptr;
     struct ibv_qp* UDQP = nullptr;
     struct ibv_cq* UDCQ = nullptr;
-    struct ibv_cq* RCCQ = nullptr;
-    struct ibv_srq* SRQ = nullptr;
 
     enum class UDOps : uint32_t {
         HandshakeRequest,
@@ -151,20 +151,30 @@ private:
     static constexpr size_t UDQPRxSize = sizeof(UDMessage) + 40;
     RecvWRData UDQPRRs;
     SendWRData UDQPSRs;
-
     std::array<temporary_buffer<uint8_t>, SendWRData::maxWR> UDOutstandingBuffers;
     std::deque<UDSend> UDSendQueue;
-    std::unordered_map<union ibv_gid, struct ibv_ah*> AHLookup;
-    std::unordered_map<EndPoint, weak_ptr<RDMAConnection>> connectionLookup;
-    static std::unique_ptr<RDMAStack> makeUDQP(std::unique_ptr<RDMAStack> stack);
 
     int sendUDQPMessage(temporary_buffer<uint8_t> buffer, const union ibv_gid& GID, uint32_t destQP);
     int trySendUDQPMessage(const temporary_buffer<uint8_t>& buffer, struct ibv_ah* AH, uint32_t destQP);
-
     void processUDMessage(UDMessage*, EndPoint);
     bool processUDSendQueue();
     bool processUDCQ();
     void freeUDSRs(uint64_t WRID);
+
+    static void fillAHAttr(struct ibv_ah_attr& AHAttr, const union ibv_gid& GID);
+    std::unordered_map<union ibv_gid, struct ibv_ah*> AHLookup;
+    std::unordered_map<EndPoint, weak_ptr<RDMAConnection>> connectionLookup;
+    static std::unique_ptr<RDMAStack> makeUDQP(std::unique_ptr<RDMAStack> stack);
+
+    static constexpr int maxExpectedConnections = 1024;
+    static constexpr int RCCQSize = RecvWRData::maxWR + 
+            (maxExpectedConnections * (SendWRData::maxWR / SendWRData::signalThreshold));
+    RecvWRData RCQPRRs;
+    struct ibv_cq* RCCQ = nullptr;
+    struct ibv_srq* SRQ = nullptr;
+    std::unordered_map<uint32_t, weak_ptr<RDMAConnection>> RCLookup;
+    int RCConnectionCount = 0;
+
     void registerPoller();
 
     bool acceptPromiseActive = false;
@@ -180,9 +190,3 @@ private:
 } // namespace rdma
 } // namespace seastar
 
-
-// TODO investigate smarter hash algorithms
-std::size_t std::hash<seastar::rdma::EndPoint>::operator()(const seastar::rdma::EndPoint& endpoint) const {
-    return std::hash<union ibv_gid>{}(endpoint.GID) ^ std::hash<uint32_t>{}(endpoint.UDQP);
-}
-    

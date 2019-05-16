@@ -76,6 +76,7 @@ set (CMAKE_SHARED_LINKER_FLAGS_DEV
   "Flags used by the shared libraries linker during builds."
   FORCE)
 
+
 mark_as_advanced (
     CMAKE_CXX_FLAGS_DEV
     CMAKE_C_FLAGS_DEV
@@ -255,6 +256,13 @@ find_package (numactl)
 find_package (ragel 6.10 REQUIRED)
 find_package (rt REQUIRED)
 find_package (yaml-cpp 0.5.1 REQUIRED)
+
+find_library(VERBS ibverbs)
+find_library(UMAD ibumad)
+find_library(MLX5 mlx5)
+find_library(NL3 nl-3)
+find_library(MNL mnl)
+find_library(NLROUTE nl-route-3)
 
 #
 # Code generation helpers.
@@ -615,7 +623,13 @@ target_link_libraries (seastar
     lksctp-tools::lksctp-tools
     protobuf::libprotobuf
     rt::rt
-    yaml-cpp::yaml-cpp)
+    yaml-cpp::yaml-cpp
+    "${VERBS}"
+    "${UMAD}"
+    "${MLX5}"
+    "${NL3}"
+    "${MNL}"
+    "${NLROUTE}")
 
 #
 # We want asserts enabled on all modes, but cmake defaults to passing

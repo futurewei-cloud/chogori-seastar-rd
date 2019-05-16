@@ -6,12 +6,20 @@
 
 #include <infiniband/verbs.h>
 
+bool operator==(const union ibv_gid& lhs, const union ibv_gid& rhs) {
+    return (memcmp(lhs.raw, rhs.raw, 16) == 0);
+}
+// TODO investigate smarter hash algorithms
+std::size_t std::hash<seastar::rdma::EndPoint>::operator()(const seastar::rdma::EndPoint& endpoint) const {
+    return std::hash<union ibv_gid>{}(endpoint.GID) ^ std::hash<uint32_t>{}(endpoint.UDQP);
+}
 
 namespace seastar {
 
 namespace rdma {
 
 static bool initialized = false;
+// TODO ref count RDMAStacks and free context?
 static struct ibv_context* ctx = nullptr;
 
 void RDMAConnection::handshakeRequest(uint32_t remoteQP) {
@@ -47,20 +55,26 @@ void RDMAConnection::handshakeRequest(uint32_t remoteQP) {
     }
     // End of slow core part
 
-
-    
+    stack->RCConnectionCount++;
+    if (stack->RCConnectionCount > RDMAStack::maxExpectedConnections) {
+        std::cerr << "Warning: CQ overrun possible" << std::endl;
+    }
 }
 
-void RDMAConnection::handshakeResponse(uint32_t remoteQP) {
-    // TODO move this part to slow core
-    struct ibv_ah_attr AHAttr;
+void RDMAStack::fillAHAttr(struct ibv_ah_attr& AHAttr, const union ibv_gid& GID) {
     memset(&AHAttr, 0, sizeof(struct ibv_ah_attr));
-    memcpy(AHAttr.grh.dgid.raw, remote.GID.raw, 16);
+    memcpy(AHAttr.grh.dgid.raw, GID.raw, 16);
     AHAttr.grh.sgid_index = 1; // Index 1 is ROCEv2 address
     AHAttr.grh.hop_limit = 64; // Equivalent to IPv4 time to live
     // For ConnectX-4 EN, we have one port per RDMA device, which starts at "1"
     AHAttr.is_global = 1; // Means use GID
     AHAttr.port_num = 1;
+}
+
+void RDMAConnection::handshakeResponse(uint32_t remoteQP) {
+    // TODO move this part to slow core
+    struct ibv_ah_attr AHAttr;
+    RDMAStack::fillAHAttr(AHAttr, remote.GID);
 
     struct ibv_qp_attr attr;
     memset(&attr, 0, sizeof(ibv_qp_attr));
@@ -177,6 +191,51 @@ void RDMAConnection::send(std::vector<temporary_buffer<uint8_t>>&& buf) {
     }
 }
 
+RDMAConnection::~RDMAConnection() noexcept {
+    // TODO slow core? reset QP to init state?
+    if (QP) {
+        ibv_destroy_qp(QP);
+        QP = nullptr;
+        stack->RCConnectionCount--;
+    }
+}
+
+RDMAConnection::RDMAConnection(RDMAConnection&& conn) noexcept {
+    isReady = conn.isReady;
+    recvQueue = std::move(conn.recvQueue);
+    sendQueue = std::move(conn.sendQueue);
+    SendWRs = std::move(conn.SendWRs);
+    outstandingBuffers = std::move(conn.outstandingBuffers);
+    QP = conn.QP;
+    conn.QP = nullptr;
+    stack = conn.stack;
+    conn.stack = nullptr;
+    remote = std::move(conn.remote);
+    recvPromiseActive = conn.recvPromiseActive;
+    recvPromise = std::move(conn.recvPromise);
+}
+
+RDMAConnection& RDMAConnection::operator=(RDMAConnection&& conn) noexcept {
+    if (this == &conn) {
+        return *this;
+    }
+
+    isReady = conn.isReady;
+    recvQueue = std::move(conn.recvQueue);
+    sendQueue = std::move(conn.sendQueue);
+    SendWRs = std::move(conn.SendWRs);
+    outstandingBuffers = std::move(conn.outstandingBuffers);
+    QP = conn.QP;
+    conn.QP = nullptr;
+    stack = conn.stack;
+    conn.stack = nullptr;
+    remote = conn.remote;
+    recvPromiseActive = conn.recvPromiseActive;
+    recvPromise = std::move(conn.recvPromise);
+
+    return *this;
+}
+
 int initRDMAContext() {
     if (initialized) {
         std::cerr << "RDMAContext already initialized!" << std::endl;
@@ -240,13 +299,7 @@ RDMAStack::~RDMAStack() {
 
 struct ibv_ah* RDMAStack::makeAH(const union ibv_gid& GID) {
     struct ibv_ah_attr AHAttr;
-    memset(&AHAttr, 0, sizeof(struct ibv_ah_attr));
-    memcpy(AHAttr.grh.dgid.raw, GID.raw, 16);
-    AHAttr.grh.sgid_index = 1; // Index 1 is ROCEv2 address
-    AHAttr.grh.hop_limit = 64; // Equivalent to IPv4 time to live
-    AHAttr.is_global = 1; // Means use GID
-    // For ConnectX-4 EN, we have one port per RDMA device, which starts at "1"
-    AHAttr.port_num = 1;
+    fillAHAttr(AHAttr, GID);
 
     struct ibv_ah* AH = ibv_create_ah(protectionDomain, &AHAttr);
     if (!AH) {
@@ -305,7 +358,7 @@ int RDMAStack::trySendUDQPMessage(const temporary_buffer<uint8_t>& buffer, struc
     SR->wr.ud.ah = AH;
     SR->wr.ud.remote_qpn = destQP;
 
-    if (UDQPSRs.postedCount == SendWRData::signalThreshold) {
+    if ((idx+1) % SendWRData::signalThreshold == 0) {
         SR->send_flags = IBV_SEND_SIGNALED;
     } else {
         SR->send_flags = 0;
@@ -342,16 +395,19 @@ bool RDMAStack::processUDSendQueue() {
         SR->wr.ud.remote_qpn = sendData.destQP;
         SR->sg_list = SG;
 
-        if (i == toProcess - 1) {
-            SR->next = nullptr;
-            // TODO
-            if (toProcess >= SendWRData::signalThreshold) {
-                SR->send_flags = IBV_SEND_SIGNALED;
-            }
+        if ((idx+1) % SendWRData::signalThreshold == 0) {
+            SR->send_flags = IBV_SEND_SIGNALED;
         } else {
-            SR->next = &(UDQPSRs.SendRequests[(baseIdx+i+1)%SendWRData::maxWR]);
             SR->send_flags = 0;
         }
+
+        if (i == toProcess - 1) {
+            SR->next = nullptr;
+        } else {
+            SR->next = &(UDQPSRs.SendRequests[(baseIdx+i+1)%SendWRData::maxWR]);
+        }
+
+        UDOutstandingBuffers[idx] = std::move(sendData.buffer);
     }
 
     struct ibv_send_wr* badSR;
@@ -368,9 +424,7 @@ bool RDMAStack::processUDSendQueue() {
 void RDMAStack::freeUDSRs(uint64_t signaledID) {
     uint32_t freed=0;
     for (int i=UDQPSRs.postedIdx; i<=(int)signaledID; ++i, ++freed) {
-        struct ibv_sge* SG = &(UDQPSRs.Segments[i]);
-        // TODO temp buffers instead of free
-        free((void*)SG->addr);
+        UDOutstandingBuffers[i] = temporary_buffer<uint8_t>();
     }
 
     UDQPSRs.postedIdx = (UDQPSRs.postedIdx + freed) % SendWRData::maxWR;
@@ -416,7 +470,7 @@ void RDMAStack::processUDMessage(UDMessage* message, EndPoint remote) {
         }
     } else if (message->op == UDOps::HandshakeResponse) {
         if (connIt == connectionLookup.end() || !connIt->second) {
-            // error, send response to remote?
+            // TODO error, send response to remote?
             return;
         }
 
@@ -593,13 +647,31 @@ std::unique_ptr<RDMAStack> RDMAStack::makeRDMAStack(void* memRegion, size_t memR
         return stack;
     }
 
+    stack->RCCQ = ibv_create_cq(ctx, RCCQSize, nullptr, nullptr, 0);
+    if (!stack->RCCQ) {
+        std::cout << "failed to create RCCQ" << std::endl;
+        return std::unique_ptr<RDMAStack>(nullptr);
+    }
+
+    struct ibv_srq_init_attr SRQAttr = {
+        .srq_context = nullptr,
+        .attr = {
+            .max_wr = RecvWRData::maxWR,
+            .max_sge = 1,
+            .srq_limit = 0}
+    };
+    stack->SRQ = ibv_create_srq(stack->protectionDomain, &SRQAttr);
+    if (!stack->SRQ) {
+        std::cout << "failed to create SRQ" << std::endl;
+        std::cout << "error: " << std::strerror(errno) << std::endl;
+        return std::unique_ptr<RDMAStack>(nullptr);
+    }
+
     stack->registerPoller();
     //TODO expose our GID and UDQP
     
     return stack;
 }
-
-
 
 } // namespace rdma
 } // namespace seastar
