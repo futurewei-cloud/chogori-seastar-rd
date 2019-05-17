@@ -47,8 +47,6 @@ struct RecvWRData {
     static constexpr int maxWR = 128;
     struct ibv_recv_wr RecvRequests[maxWR];
     struct ibv_sge Segments[maxWR];
-    uint32_t unusedIdx = 0;
-    uint32_t unusedCount = 0;
 };
 
 struct SendWRData {
@@ -100,10 +98,11 @@ private:
     std::deque<temporary_buffer<uint8_t>> recvQueue;
     std::deque<temporary_buffer<uint8_t>> sendQueue;
 
-    SendWRData SendWRs;
+    SendWRData sendWRs;
     std::array<temporary_buffer<uint8_t>, SendWRData::maxWR> outstandingBuffers;
     template <class VecType>
     bool processSends(VecType& queue);
+    void incomingMessage(unsigned char* data, uint32_t size);
 
     struct ibv_qp* QP = nullptr;
     RDMAStack* stack = nullptr;
@@ -112,8 +111,10 @@ private:
     bool recvPromiseActive = false;
     promise<temporary_buffer<uint8_t>&&> recvPromise;
 
-    void handshakeResponse(uint32_t remoteQP);
-    void handshakeRequest(uint32_t remoteQP);
+    void makeQP();
+    void makeHandshakeRequest();
+    void completeHandshake(uint32_t remoteQP);
+    void processHandshakeRequest(uint32_t remoteQP);
 
     RDMAConnection() = delete;
 
@@ -125,7 +126,7 @@ public:
     union ibv_gid myGID;
 
     future<RDMAConnection> accept();
-    RDMAConnection connect(EndPoint endpoint);
+    RDMAConnection connect(const EndPoint& remote);
 
     static std::unique_ptr<RDMAStack> makeRDMAStack(void* memRegion, size_t memRegionSize);
     RDMAStack() = default;
@@ -145,7 +146,7 @@ private:
     };
     struct UDMessage {
         UDOps op;
-        uint32_t remoteQP;
+        uint32_t QPNum;
     };
     // There is a 40 byte overhead for UD
     static constexpr size_t UDQPRxSize = sizeof(UDMessage) + 40;
@@ -157,15 +158,18 @@ private:
     int sendUDQPMessage(temporary_buffer<uint8_t> buffer, const union ibv_gid& GID, uint32_t destQP);
     int trySendUDQPMessage(const temporary_buffer<uint8_t>& buffer, struct ibv_ah* AH, uint32_t destQP);
     void processUDMessage(UDMessage*, EndPoint);
+    void sendHandshakeResponse(const EndPoint& endpoint, uint32_t QPNum);
+    void sendHandshakeRequest(const EndPoint& endpoint, uint32_t QPNum);
     bool processUDSendQueue();
     bool processUDCQ();
-    void freeUDSRs(uint64_t WRID);
+    static void processCompletedSRs(std::array<temporary_buffer<uint8_t>, SendWRData::maxWR>& buffers, SendWRData& WRData, uint64_t signaledID);
 
     static void fillAHAttr(struct ibv_ah_attr& AHAttr, const union ibv_gid& GID);
     std::unordered_map<union ibv_gid, struct ibv_ah*> AHLookup;
     std::unordered_map<EndPoint, weak_ptr<RDMAConnection>> connectionLookup;
     static std::unique_ptr<RDMAStack> makeUDQP(std::unique_ptr<RDMAStack> stack);
 
+    static constexpr uint32_t RCDataSize = 8192;
     static constexpr int maxExpectedConnections = 1024;
     static constexpr int RCCQSize = RecvWRData::maxWR + 
             (maxExpectedConnections * (SendWRData::maxWR / SendWRData::signalThreshold));
@@ -173,6 +177,7 @@ private:
     struct ibv_cq* RCCQ = nullptr;
     struct ibv_srq* SRQ = nullptr;
     std::unordered_map<uint32_t, weak_ptr<RDMAConnection>> RCLookup;
+    bool processRCCQ();
     int RCConnectionCount = 0;
 
     void registerPoller();

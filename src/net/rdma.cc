@@ -22,7 +22,7 @@ static bool initialized = false;
 // TODO ref count RDMAStacks and free context?
 static struct ibv_context* ctx = nullptr;
 
-void RDMAConnection::handshakeRequest(uint32_t remoteQP) {
+void RDMAConnection::makeQP() {
     // TODO move to slow core
     struct ibv_qp_init_attr init_attr = {
         .qp_context = nullptr,
@@ -53,12 +53,24 @@ void RDMAConnection::handshakeRequest(uint32_t remoteQP) {
         std::cout << "failed to transition into init state" << std::endl;
         return; 
     }
-    // End of slow core part
+    // end of slow core part
 
     stack->RCConnectionCount++;
     if (stack->RCConnectionCount > RDMAStack::maxExpectedConnections) {
         std::cerr << "Warning: CQ overrun possible" << std::endl;
     }
+    stack->RCLookup[QP->qp_num] = weak_from_this();
+}
+
+void RDMAConnection::makeHandshakeRequest() {
+    makeQP();
+    stack->sendHandshakeRequest(remote, QP->qp_num);
+}
+
+void RDMAConnection::processHandshakeRequest(uint32_t remoteQP) {
+    makeQP();
+    stack->sendHandshakeResponse(remote, QP->qp_num);
+    completeHandshake(remoteQP);
 }
 
 void RDMAStack::fillAHAttr(struct ibv_ah_attr& AHAttr, const union ibv_gid& GID) {
@@ -71,7 +83,7 @@ void RDMAStack::fillAHAttr(struct ibv_ah_attr& AHAttr, const union ibv_gid& GID)
     AHAttr.port_num = 1;
 }
 
-void RDMAConnection::handshakeResponse(uint32_t remoteQP) {
+void RDMAConnection::completeHandshake(uint32_t remoteQP) {
     // TODO move this part to slow core
     struct ibv_ah_attr AHAttr;
     RDMAStack::fillAHAttr(AHAttr, remote.GID);
@@ -107,26 +119,25 @@ void RDMAConnection::handshakeResponse(uint32_t remoteQP) {
     } 
     // End of slow core part
 
-
     isReady = true;
     processSends<std::deque<temporary_buffer<uint8_t>>>(sendQueue);
 }
 
 template <class VecType>
 bool RDMAConnection::processSends(VecType& queue) {
-    if (queue.size() == 0 || SendWRs.postedCount == SendWRData::maxWR) {
+    if (queue.size() == 0 || sendWRs.postedCount == SendWRData::maxWR) {
         return false;
     }
 
-    int toProcess = std::min((int)queue.size(), (int)(SendWRData::maxWR - SendWRs.postedCount));
-    int idx = (SendWRs.postedIdx + SendWRs.postedCount) % SendWRData::maxWR;
+    int toProcess = std::min((int)queue.size(), (int)(SendWRData::maxWR - sendWRs.postedCount));
+    int idx = (sendWRs.postedIdx + sendWRs.postedCount) % SendWRData::maxWR;
     int baseIdx = idx;
-    struct ibv_send_wr* firstSR = &(SendWRs.SendRequests[idx]);
+    struct ibv_send_wr* firstSR = &(sendWRs.SendRequests[idx]);
 
     for(int i=0; i < toProcess; ++i, idx = (baseIdx + i) % SendWRData::maxWR) {
         temporary_buffer<uint8_t>& sendData = queue[i];
-        struct ibv_sge* SG = &(SendWRs.Segments[idx]);
-        struct ibv_send_wr* SR = &(SendWRs.SendRequests[idx]);
+        struct ibv_sge* SG = &(sendWRs.Segments[idx]);
+        struct ibv_send_wr* SR = &(sendWRs.SendRequests[idx]);
 
         SG->addr = (uint64_t)sendData.get();
         SG->length = sendData.size();
@@ -141,7 +152,7 @@ bool RDMAConnection::processSends(VecType& queue) {
         if (i == toProcess - 1) {
             SR->next = nullptr;
         } else {
-            SR->next = &(SendWRs.SendRequests[(baseIdx+i+1)%SendWRData::maxWR]);
+            SR->next = &(sendWRs.SendRequests[(baseIdx+i+1)%SendWRData::maxWR]);
         }
 
         outstandingBuffers[idx] = std::move(sendData);
@@ -154,7 +165,7 @@ bool RDMAConnection::processSends(VecType& queue) {
         return false;
     }
 
-    SendWRs.postedCount += toProcess;
+    sendWRs.postedCount += toProcess;
     queue.erase(queue.cbegin(), queue.cbegin()+toProcess);
     return true;
 } 
@@ -175,6 +186,16 @@ future<temporary_buffer<uint8_t>&&> RDMAConnection::recv() {
     recvPromise = promise<temporary_buffer<uint8_t>&&>();
     recvPromiseActive = true;
     return recvPromise.get_future();
+}
+
+void RDMAConnection::incomingMessage(unsigned char* data, uint32_t size) {
+    temporary_buffer<uint8_t> buf(data, size, make_free_deleter(data));
+    if (recvPromiseActive) {
+        recvPromiseActive = false;
+        recvPromise.set_value(std::move(buf));
+    } else {
+        recvQueue.push_back(std::move(buf));
+    }
 }
 
 void RDMAConnection::send(std::vector<temporary_buffer<uint8_t>>&& buf) {
@@ -204,7 +225,7 @@ RDMAConnection::RDMAConnection(RDMAConnection&& conn) noexcept {
     isReady = conn.isReady;
     recvQueue = std::move(conn.recvQueue);
     sendQueue = std::move(conn.sendQueue);
-    SendWRs = std::move(conn.SendWRs);
+    sendWRs = std::move(conn.sendWRs);
     outstandingBuffers = std::move(conn.outstandingBuffers);
     QP = conn.QP;
     conn.QP = nullptr;
@@ -223,7 +244,7 @@ RDMAConnection& RDMAConnection::operator=(RDMAConnection&& conn) noexcept {
     isReady = conn.isReady;
     recvQueue = std::move(conn.recvQueue);
     sendQueue = std::move(conn.sendQueue);
-    SendWRs = std::move(conn.SendWRs);
+    sendWRs = std::move(conn.sendWRs);
     outstandingBuffers = std::move(conn.outstandingBuffers);
     QP = conn.QP;
     conn.QP = nullptr;
@@ -295,6 +316,22 @@ RDMAStack::~RDMAStack() {
     }
 
     // TODO Connections, promises, etc, poller?
+}
+
+void RDMAStack::sendHandshakeResponse(const EndPoint& endpoint, uint32_t QPNum) {
+    temporary_buffer<uint8_t> response(sizeof(UDMessage));
+    UDMessage* message = (UDMessage*)response.get();
+    message->op = UDOps::HandshakeResponse;
+    message->QPNum = QPNum;
+    sendUDQPMessage(std::move(response), endpoint.GID, endpoint.UDQP);
+}
+
+void RDMAStack::sendHandshakeRequest(const EndPoint& endpoint, uint32_t QPNum) {
+    temporary_buffer<uint8_t> response(sizeof(UDMessage));
+    UDMessage* message = (UDMessage*)response.get();
+    message->op = UDOps::HandshakeRequest;
+    message->QPNum = QPNum;
+    sendUDQPMessage(std::move(response), endpoint.GID, endpoint.UDQP);
 }
 
 struct ibv_ah* RDMAStack::makeAH(const union ibv_gid& GID) {
@@ -421,17 +458,16 @@ bool RDMAStack::processUDSendQueue() {
     return true;
 } 
 
-void RDMAStack::freeUDSRs(uint64_t signaledID) {
+void RDMAStack::processCompletedSRs(std::array<temporary_buffer<uint8_t>, SendWRData::maxWR>& buffers, SendWRData& WRData, uint64_t signaledID) {
     uint32_t freed=0;
-    for (int i=UDQPSRs.postedIdx; i<=(int)signaledID; ++i, ++freed) {
-        UDOutstandingBuffers[i] = temporary_buffer<uint8_t>();
+    for (int i=WRData.postedIdx; i<=(int)signaledID; ++i, ++freed) {
+        buffers[i] = temporary_buffer<uint8_t>();
     }
 
-    UDQPSRs.postedIdx = (UDQPSRs.postedIdx + freed) % SendWRData::maxWR;
-    assert(freed <= UDQPSRs.postedCount);
-    UDQPSRs.postedCount -= freed;
+    WRData.postedIdx = (WRData.postedIdx + freed) % SendWRData::maxWR;
+    assert(freed <= WRData.postedCount);
+    WRData.postedCount -= freed;
 }
-
 
 future<RDMAConnection> RDMAStack::accept() {
     if (acceptPromiseActive) {
@@ -450,6 +486,18 @@ future<RDMAConnection> RDMAStack::accept() {
     return acceptPromise.get_future();
 }
 
+RDMAConnection RDMAStack::connect(const EndPoint& remote) {
+    auto connIt = connectionLookup.find(remote);
+    if (connIt != connectionLookup.end()) {
+        // TODO do something probably
+    }
+
+    RDMAConnection conn(this, remote);
+    conn.makeHandshakeRequest();
+    connectionLookup[remote] = conn.weak_from_this();
+    return conn;
+}
+
 void RDMAStack::processUDMessage(UDMessage* message, EndPoint remote) {
     auto connIt = connectionLookup.find(remote);
 
@@ -460,7 +508,7 @@ void RDMAStack::processUDMessage(UDMessage* message, EndPoint remote) {
         }
 
         RDMAConnection conn(this, remote);
-        conn.handshakeRequest(message->remoteQP);
+        conn.processHandshakeRequest(message->QPNum);
         connectionLookup[remote] = conn.weak_from_this();
         if (acceptPromiseActive) {
             acceptPromiseActive = false;
@@ -474,10 +522,72 @@ void RDMAStack::processUDMessage(UDMessage* message, EndPoint remote) {
             return;
         }
 
-        connIt->second->handshakeResponse(message->remoteQP);
+        connIt->second->completeHandshake(message->QPNum);
     } else {
         std::cerr << "Unknown UD op" << std::endl;
     }
+}
+
+bool RDMAStack::processRCCQ() {
+    struct ibv_wc WCs[8];
+    int completed = ibv_poll_cq(UDCQ, 8, WCs);
+    assert(completed >= 0);
+
+    if (completed == 0) {
+        return false;
+    }
+
+    int recvWCs = 0;
+    int firstRecvIdx = 0;
+
+    for (int i=0; i<completed; ++i) {
+        weak_ptr<RDMAConnection>& conn = RCLookup[WCs[i].qp_num];
+        if (!conn) {
+            // TODO remove from map? or not in map to begin with?
+        }
+
+        if (WCs[i].opcode == IBV_WC_SEND) {
+            processCompletedSRs(conn->outstandingBuffers, conn->sendWRs, WCs[i].wr_id);
+            if (WCs[i].status != IBV_WC_SUCCESS) {
+                std::cerr << "error on send wc" << std::endl;
+            }
+            conn->processSends(conn->sendQueue);
+        } else {
+            int idx = WCs[i].wr_id;
+            if (recvWCs == 0) {
+                firstRecvIdx = idx;
+            }
+            ++recvWCs;
+
+            if (WCs[i].status != IBV_WC_SUCCESS) {
+                std::cerr << "error on recv wc" << std::endl;
+            } else {
+                unsigned char* data = (unsigned char*)RCQPRRs.Segments[idx].addr;
+                uint32_t size = WCs[i].byte_len;
+                conn->incomingMessage(data, size);
+            }
+        }
+    }
+
+    for (int i=0; i<recvWCs; ++i) {
+        int idx = (firstRecvIdx + i) % RecvWRData::maxWR;
+        struct ibv_recv_wr& RR = RCQPRRs.RecvRequests[idx];
+
+        if (i == recvWCs-1) {
+            RR.next = nullptr;
+        } else {
+            RR.next = &(RCQPRRs.RecvRequests[(idx+1)%RecvWRData::maxWR]);
+        }
+        RCQPRRs.Segments[idx].addr = (uint64_t)malloc(RCDataSize);
+    }
+
+    struct ibv_recv_wr* badRR;
+    if (ibv_post_srq_recv(SRQ, &(RCQPRRs.RecvRequests[firstRecvIdx]), &badRR)) {
+        std::cerr << "error on RC post_recv" << std::endl;
+    }
+
+    return true;
+
 }
 
 bool RDMAStack::processUDCQ() {
@@ -491,7 +601,7 @@ bool RDMAStack::processUDCQ() {
 
     for (int i=0; i<completed; ++i) {
         if (WCs[i].opcode == IBV_WC_SEND) {
-            freeUDSRs(WCs[i].wr_id);
+            processCompletedSRs(UDOutstandingBuffers, UDQPSRs, WCs[i].wr_id);
             if (WCs[i].status != IBV_WC_SUCCESS) {
                 std::cerr << "error on send wc" << std::endl;
             }
@@ -521,6 +631,7 @@ bool RDMAStack::poller() {
     bool didWork = processUDCQ();
 
     didWork |= processUDSendQueue();
+    didWork |= processRCCQ();
 
     return didWork;
 }
@@ -664,6 +775,28 @@ std::unique_ptr<RDMAStack> RDMAStack::makeRDMAStack(void* memRegion, size_t memR
     if (!stack->SRQ) {
         std::cout << "failed to create SRQ" << std::endl;
         std::cout << "error: " << std::strerror(errno) << std::endl;
+        return std::unique_ptr<RDMAStack>(nullptr);
+    }
+
+    for (int i=0; i<RecvWRData::maxWR; ++i) {
+        struct ibv_recv_wr& RR = stack->RCQPRRs.RecvRequests[i];
+        struct ibv_sge& SG = stack->RCQPRRs.Segments[i];
+
+        RR.wr_id = i;
+        if (i == RecvWRData::maxWR-1) {
+            RR.next = nullptr;
+        } else {
+            RR.next = &(stack->RCQPRRs.RecvRequests[i+1]);
+        }
+        SG.addr = (uint64_t)malloc(RCDataSize);
+        SG.length = RCDataSize;
+        SG.lkey = stack->memRegionHandle->lkey;
+        RR.sg_list = &SG;
+        RR.num_sge = 1;
+    } 
+    struct ibv_recv_wr* badRR;
+    if (ibv_post_srq_recv(stack->SRQ, stack->RCQPRRs.RecvRequests, &badRR)) {
+        std::cerr << "failed to post SRQ RRs" << std::endl;
         return std::unique_ptr<RDMAStack>(nullptr);
     }
 
