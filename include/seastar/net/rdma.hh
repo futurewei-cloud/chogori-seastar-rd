@@ -9,6 +9,7 @@
 #include <seastar/core/reactor.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/weak_ptr.hh>
+#include <seastar/core/sstring.hh>
 
 #include <infiniband/verbs.h>
 
@@ -33,7 +34,7 @@ template <>
 struct hash<seastar::rdma::EndPoint> {
     std::size_t operator()(const seastar::rdma::EndPoint&) const;
 };
-   
+
 }
 
 namespace seastar {
@@ -69,7 +70,7 @@ struct UDSend {
     temporary_buffer<uint8_t> buffer;
     struct ibv_ah* AH;
     uint32_t destQP;
-    UDSend (temporary_buffer<uint8_t>&& buf, struct ibv_ah* ah, uint32_t qp) : 
+    UDSend (temporary_buffer<uint8_t>&& buf, struct ibv_ah* ah, uint32_t qp) :
         buffer(std::move(buf)), AH(ah), destQP(qp) {}
     UDSend() = delete;
 };
@@ -83,6 +84,8 @@ struct EndPoint {
     bool operator==(const EndPoint& rhs) const {
         return (GID == rhs.GID) && (UDQP == rhs.UDQP);
     }
+    static sstring GIDToString(union ibv_gid gid);
+    static int StringToGID(const sstring& strGID, union ibv_gid& result);
 };
 
 class RDMAConnection : public weakly_referencable<RDMAConnection> {
@@ -90,7 +93,7 @@ public:
     future<temporary_buffer<uint8_t>&&> recv();
     void send(std::vector<temporary_buffer<uint8_t>>&& buf);
 
-    RDMAConnection(RDMAStack* stack, EndPoint remote) : 
+    RDMAConnection(RDMAStack* stack, EndPoint remote) :
         stack(stack), remote(remote) {}
     ~RDMAConnection() noexcept;
     RDMAConnection(RDMAConnection&&) noexcept;
@@ -167,7 +170,7 @@ private:
     static std::unique_ptr<RDMAStack> makeUDQP(std::unique_ptr<RDMAStack> stack);
 
     static constexpr int maxExpectedConnections = 1024;
-    static constexpr int RCCQSize = RecvWRData::maxWR + 
+    static constexpr int RCCQSize = RecvWRData::maxWR +
             (maxExpectedConnections * (SendWRData::maxWR / SendWRData::signalThreshold));
     RecvWRData RCQPRRs;
     struct ibv_cq* RCCQ = nullptr;
@@ -189,4 +192,3 @@ private:
 
 } // namespace rdma
 } // namespace seastar
-
