@@ -372,6 +372,8 @@ public:
         uint64_t fstream_read_aheads_discarded = 0;
         uint64_t fstream_read_ahead_discarded_bytes = 0;
     };
+
+    std::unique_ptr<rdma::RDMAStack> _rdma_stack;
 private:
     file_desc _notify_eventfd;
     file_desc _task_quota_timer;
@@ -463,7 +465,6 @@ private:
     /// otherwise. This function should be used by a handler to return early if a task appears.
     idle_cpu_handler _idle_cpu_handler{ [] (work_waiting_on_reactor) {return idle_cpu_handler_result::no_more_work;} };
     std::unique_ptr<network_stack> _network_stack;
-    std::unique_ptr<rdma::RDMAStack> _rdma_stack;
     // _lowres_clock_impl will only be created on cpu 0
     std::unique_ptr<lowres_clock_impl> _lowres_clock_impl;
     lowres_clock::time_point _lowres_next_timeout;

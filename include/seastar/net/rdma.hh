@@ -41,6 +41,8 @@ namespace rdma {
 
 class RDMAStack;
 
+// Opens the RDMA device context, which is shared by all cores/RDMAStacks. The verbs API
+// is thread safe so sharing it is ok. Should only be called once at program start
 int initRDMAContext();
 
 struct RecvWRData {
@@ -83,9 +85,11 @@ struct EndPoint {
     }
 };
 
+class RDMAConnectionError : std::exception {};
+
 class RDMAConnection : public weakly_referencable<RDMAConnection> {
 public:
-    future<temporary_buffer<uint8_t>&&> recv();
+    future<temporary_buffer<uint8_t>> recv();
     void send(std::vector<temporary_buffer<uint8_t>>&& buf);
 
     RDMAConnection(RDMAStack* stack, EndPoint remote) : 
@@ -95,6 +99,7 @@ public:
     RDMAConnection& operator=(RDMAConnection&&) noexcept;
 private:
     bool isReady = false;
+    bool errorState = false;
     std::deque<temporary_buffer<uint8_t>> recvQueue;
     std::deque<temporary_buffer<uint8_t>> sendQueue;
 
@@ -109,12 +114,12 @@ private:
     EndPoint remote;
 
     bool recvPromiseActive = false;
-    promise<temporary_buffer<uint8_t>&&> recvPromise;
+    promise<temporary_buffer<uint8_t>> recvPromise;
 
     void makeQP();
     void makeHandshakeRequest();
     void completeHandshake(uint32_t remoteQP);
-    void processHandshakeRequest(uint32_t remoteQP);
+    void processHandshakeRequest(uint32_t remoteQP, uint32_t responseId);
 
     RDMAConnection() = delete;
 
@@ -123,7 +128,7 @@ private:
 
 class RDMAStack {
 public:
-    union ibv_gid myGID;
+    EndPoint localEndpoint;
 
     future<RDMAConnection> accept();
     RDMAConnection connect(const EndPoint& remote);
@@ -147,6 +152,7 @@ private:
     struct UDMessage {
         UDOps op;
         uint32_t QPNum;
+        uint32_t requestId;
     };
     // There is a 40 byte overhead for UD
     static constexpr size_t UDQPRxSize = sizeof(UDMessage) + 40;
@@ -158,15 +164,16 @@ private:
     int sendUDQPMessage(temporary_buffer<uint8_t> buffer, const union ibv_gid& GID, uint32_t destQP);
     int trySendUDQPMessage(const temporary_buffer<uint8_t>& buffer, struct ibv_ah* AH, uint32_t destQP);
     void processUDMessage(UDMessage*, EndPoint);
-    void sendHandshakeResponse(const EndPoint& endpoint, uint32_t QPNum);
-    void sendHandshakeRequest(const EndPoint& endpoint, uint32_t QPNum);
+    void sendHandshakeResponse(const EndPoint& endpoint, uint32_t QPNum, uint32_t requestId);
+    uint32_t sendHandshakeRequest(const EndPoint& endpoint, uint32_t QPNum);
+    int handshakeId = 0;
     bool processUDSendQueue();
     bool processUDCQ();
     static void processCompletedSRs(std::array<temporary_buffer<uint8_t>, SendWRData::maxWR>& buffers, SendWRData& WRData, uint64_t signaledID);
 
     static void fillAHAttr(struct ibv_ah_attr& AHAttr, const union ibv_gid& GID);
     std::unordered_map<union ibv_gid, struct ibv_ah*> AHLookup;
-    std::unordered_map<EndPoint, weak_ptr<RDMAConnection>> connectionLookup;
+    std::unordered_map<int, weak_ptr<RDMAConnection>> handshakeLookup;
     static std::unique_ptr<RDMAStack> makeUDQP(std::unique_ptr<RDMAStack> stack);
 
     static constexpr uint32_t RCDataSize = 8192;
