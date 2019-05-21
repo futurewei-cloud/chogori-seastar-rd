@@ -74,8 +74,8 @@ inline LogEntry StartLogStream() {
 
 #ifndef NDEBUG
 #define K2ASSERT(cond, msg) { \
-    K2ERROR(msg); \
-    assert(cond); \
+    if(!(cond)) {K2ERROR(msg);} \
+    assert((cond)); \
 }
 #else
 #define K2ASSERT(cond, msg)

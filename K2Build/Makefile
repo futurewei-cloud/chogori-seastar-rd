@@ -5,8 +5,8 @@ package_version=$(shell git describe --tags `git rev-list --tags --max-count=1`)
 all: build
 INSTALL_PFX=install/usr/local
 BUILD_DIR=build/release
-DEBUG_DIR=build/debug
-DEPEND_FLAGS=--depends libfmt-k2 -d 'libdpdk-k2-dev = 0.3.1' -d libboost-all-dev -d liblz4-dev -d libgnutls28-dev -d libprotobuf-dev -d libyaml-cpp-dev -d libc-ares-dev -d libcrypto++-dev -d libsctp-dev -d libunistring-dev
+#DEPEND_FLAGS=--depends libfmt-k2 -d 'libdpdk-k2-dev = 0.3.1' -d libboost-thread-dev -d libboost-system-dev -d libboost-chrono-dev -d libboost-program-options-dev -d libboost-filesystem-dev -d libboost-test-dev -d liblz4-dev -d libgnutls28-dev -d libprotobuf-dev -d libyaml-cpp-dev -d libc-ares-dev -d libcrypto++-dev -d libsctp-dev -d libunistring-dev
+DEPEND_FLAGS=--depends libfmt-k2 -d libboost-thread-dev -d libboost-system-dev -d libboost-chrono-dev -d libboost-program-options-dev -d libboost-filesystem-dev -d libboost-test-dev -d liblz4-dev -d libgnutls28-dev -d libprotobuf-dev -d libyaml-cpp-dev -d libc-ares-dev -d libcrypto++-dev -d libsctp-dev -d libunistring-dev -d libibverbs-dev
 
 build: configure
 	@echo ">>> Building"
@@ -14,7 +14,7 @@ build: configure
 
 configure: submodule
 	@echo ">>> Configuring"
-	@cd ../ && ./configure.py --enable-dpdk --mode=release --prefix=$(INSTALL_PFX)
+	@cd ../ && ./configure.py --mode=release --prefix=$(INSTALL_PFX)
 
 submodule:
 	@echo ">>> Fetching submodules"
@@ -32,8 +32,6 @@ clean:
 	@echo ">>> Cleaning"
 	@cd ../ && ninja -C $(BUILD_DIR) clean || true
 	@rm -f libseastar-k2_* || true
-	@cd ../ && ninja -C $(DEBUG_DIR) clean || true
-	@rm -f libseastar-dbg-k2_* || true
 	@cd ../ && rm -rf build
 
 package: install

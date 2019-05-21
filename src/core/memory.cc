@@ -1343,17 +1343,13 @@ void disable_large_allocation_warning() {
     cpu_mem.large_allocation_warning_threshold = std::numeric_limits<size_t>::max();
 }
 
-void configure(std::vector<resource::memory> m, bool mbind,
-        optional<std::string> hugetlbfs_path) {
+void configure(std::vector<resource::memory> m, bool mbind, bool hugepages) {
     size_t total = 0;
     for (auto&& x : m) {
         total += x.bytes;
     }
     allocate_system_memory_fn sys_alloc = allocate_anonymous_memory;
-    if (hugetlbfs_path) {
-        // std::function is copyable, but file_desc is not, so we must use
-        // a shared_ptr to allow sys_alloc to be copied around
-        auto fdp = make_lw_shared<file_desc>(file_desc::temporary(*hugetlbfs_path));
+    if (hugepages) {
         sys_alloc = [] (optional<void*> where, size_t how_much) {
             return allocate_hugetlbfs_memory(where, how_much);
         };
@@ -1380,7 +1376,7 @@ void configure(std::vector<resource::memory> m, bool mbind,
 #endif
         pos += x.bytes;
     }
-    if (hugetlbfs_path) {
+    if (hugepages) {
         cpu_mem.init_virt_to_phys_map();
     }
 }
@@ -1850,7 +1846,7 @@ reclaimer::~reclaimer() {
 void set_reclaim_hook(std::function<void (std::function<void ()>)> hook) {
 }
 
-void configure(std::vector<resource::memory> m, bool mbind, compat::optional<std::string> hugepages_path) {
+void configure(std::vector<resource::memory> m, bool mbind, bool hugepages) {
 }
 
 statistics stats() {

@@ -278,7 +278,9 @@ RDMAConnection& RDMAConnection::operator=(RDMAConnection&& conn) noexcept {
 }
 
 int initRDMAContext() {
-    K2ASSERT(!initialized, "Tried to initialize RDMAContext more than once");
+    if (initialized) {
+        return 0;
+    }
 
     int numDevices;
     struct ibv_device** devices = ibv_get_device_list(&numDevices);
@@ -288,11 +290,18 @@ int initRDMAContext() {
     }
 
     // TODO get correct device from configuration
-    int deviceIdx = 0;
+    int deviceIdx=0;
     for(; deviceIdx < numDevices; ++deviceIdx) {
+        std::cerr << ibv_get_device_name(devices[deviceIdx]) << std::endl;
         if (strcmp(ibv_get_device_name(devices[deviceIdx]), "mlx5_1") == 0) {
             break;
         }
+    }
+
+    if (deviceIdx == numDevices) {
+        ibv_free_device_list(devices);
+        K2WARN("No suitable RDMA device found");
+        return -1;
     }
 
     ctx = ibv_open_device(devices[deviceIdx]);
@@ -749,7 +758,9 @@ std::unique_ptr<RDMAStack> RDMAStack::makeUDQP(std::unique_ptr<RDMAStack> stack)
 }
 
 std::unique_ptr<RDMAStack> RDMAStack::makeRDMAStack(void* memRegion, size_t memRegionSize) {
-    assert(initialized);
+    if (!initialized || !ctx) {
+        return std::unique_ptr<RDMAStack>(nullptr);
+    }
 
     std::unique_ptr<RDMAStack> stack = std::make_unique<RDMAStack>();
 

@@ -4048,7 +4048,9 @@ int reactor::run() {
 
     if (smp::_using_rdma) {
         _rdma_stack = rdma::RDMAStack::makeRDMAStack(memory::getMemRegionStart(), memory::getMemRegionSize());
-        assert(_rdma_stack);
+        if (!_rdma_stack) {
+            fmt::print("warning: failed to initialize rdma stack\n");
+        }
     }
 
     _cpu_started.wait(smp::count).then([this] {
@@ -4738,7 +4740,7 @@ smp::get_options_description()
         ("cpuset", bpo::value<cpuset_bpo_wrapper>(), "CPUs to use (in cpuset(7) format; default: all))")
         ("memory,m", bpo::value<std::string>(), "memory to use, in bytes (ex: 4G) (default: all)")
         ("reserve-memory", bpo::value<std::string>(), "memory reserved to OS (if --memory not specified)")
-        ("hugepages", bpo::value<std::string>(), "path to accessible hugetlbfs mount (typically /dev/hugepages/something)")
+        ("hugepages", "Enabled 2MB hugepages from hugetlbfs")
         ("lock-memory", bpo::value<bool>(), "lock all memory (prevents swapping)")
         ("thread-affinity", bpo::value<bool>()->default_value(true), "pin threads to their cpus (disable for overprovisioning)")
 #ifdef SEASTAR_HAVE_HWLOC
@@ -5139,9 +5141,7 @@ void smp::configure(boost::program_options::variables_map configuration)
     if (configuration.count("memory")) {
         rc.total_memory = parse_memory_size(configuration["memory"].as<std::string>());
 #ifdef SEASTAR_HAVE_DPDK
-        if (configuration.count("hugepages") &&
-            !configuration["network-stack"].as<std::string>().compare("native") &&
-            _using_dpdk) {
+        if (configuration.count("hugepages") && _using_dpdk) {
             size_t dpdk_memory = dpdk::eal::mem_size(smp::count);
 
             if (dpdk_memory >= rc.total_memory) {
@@ -5162,10 +5162,7 @@ void smp::configure(boost::program_options::variables_map configuration)
     if (configuration.count("reserve-memory")) {
         rc.reserve_memory = parse_memory_size(configuration["reserve-memory"].as<std::string>());
     }
-    compat::optional<std::string> hugepages_path;
-    if (configuration.count("hugepages")) {
-        hugepages_path = configuration["hugepages"].as<std::string>();
-    }
+
     auto mlock = false;
     if (configuration.count("lock-memory")) {
         mlock = configuration["lock-memory"].as<bool>();
@@ -5176,6 +5173,11 @@ void smp::configure(boost::program_options::variables_map configuration)
             // Don't hard fail for now, it's hard to get the configuration right
             fmt::print("warning: failed to mlockall: {}\n", strerror(errno));
         }
+    }
+
+    bool hugepages = false;
+    if (configuration.count("hugepages")) {
+        hugepages = true;
     }
 
     rc.cpus = smp::count;
@@ -5192,7 +5194,7 @@ void smp::configure(boost::program_options::variables_map configuration)
     if (thread_affinity) {
         smp::pin(allocations[0].cpu_id);
     }
-    memory::configure(allocations[0].mem, mbind, hugepages_path);
+    memory::configure(allocations[0].mem, mbind, hugepages);
 
     if (configuration.count("abort-on-seastar-bad-alloc")) {
         memory::enable_abort_on_allocation_failure();
@@ -5263,13 +5265,13 @@ void smp::configure(boost::program_options::variables_map configuration)
     unsigned i;
     for (i = 1; i < smp::count; i++) {
         auto allocation = allocations[i];
-        create_thread([configuration, &disk_config, hugepages_path, i, allocation, assign_io_queue, alloc_io_queue, thread_affinity, heapprof_enabled, mbind, backend_selector] {
+        create_thread([configuration, &disk_config, hugepages, i, allocation, assign_io_queue, alloc_io_queue, thread_affinity, heapprof_enabled, mbind, backend_selector] {
             auto thread_name = seastar::format("reactor-{}", i);
             pthread_setname_np(pthread_self(), thread_name.c_str());
             if (thread_affinity) {
                 smp::pin(allocation.cpu_id);
             }
-            memory::configure(allocation.mem, mbind, hugepages_path);
+            memory::configure(allocation.mem, mbind, hugepages);
             memory::set_heap_profiling_enabled(heapprof_enabled);
             sigset_t mask;
             sigfillset(&mask);

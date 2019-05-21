@@ -76,8 +76,7 @@ static constexpr size_t huge_page_size =
 char* getMemRegionStart();
 size_t getMemRegionSize();
 
-void configure(std::vector<resource::memory> m, bool mbind,
-        compat::optional<std::string> hugetlbfs_path = {});
+void configure(std::vector<resource::memory> m, bool mbind, bool hugepages);
 
 void enable_abort_on_allocation_failure();
 

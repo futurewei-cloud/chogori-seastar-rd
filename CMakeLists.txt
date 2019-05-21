@@ -258,11 +258,6 @@ find_package (rt REQUIRED)
 find_package (yaml-cpp 0.5.1 REQUIRED)
 
 find_library(VERBS ibverbs)
-find_library(UMAD ibumad)
-find_library(MLX5 mlx5)
-find_library(NL3 nl-3)
-find_library(MNL mnl)
-find_library(NLROUTE nl-route-3)
 
 #
 # Code generation helpers.
@@ -624,12 +619,7 @@ target_link_libraries (seastar
     protobuf::libprotobuf
     rt::rt
     yaml-cpp::yaml-cpp
-    "${VERBS}"
-    "${UMAD}"
-    "${MLX5}"
-    "${NL3}"
-    "${MNL}"
-    "${NLROUTE}")
+    "${VERBS}")
 
 #
 # We want asserts enabled on all modes, but cmake defaults to passing
