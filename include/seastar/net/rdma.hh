@@ -13,7 +13,6 @@
 #include <infiniband/verbs.h>
 
 bool operator==(const union ibv_gid& lhs, const union ibv_gid& rhs);
-
 namespace seastar { namespace rdma { class EndPoint; }}
 
 namespace std {
@@ -33,13 +32,14 @@ template <>
 struct hash<seastar::rdma::EndPoint> {
     std::size_t operator()(const seastar::rdma::EndPoint&) const;
 };
-   
+
 }
 
 namespace seastar {
 namespace rdma {
 
 class RDMAStack;
+class RDMAListener;
 
 // Opens the RDMA device context, which is shared by all cores/RDMAStacks. The verbs API
 // is thread safe so sharing it is ok. Should only be called once at program start
@@ -69,7 +69,7 @@ struct UDSend {
     temporary_buffer<uint8_t> buffer;
     struct ibv_ah* AH;
     uint32_t destQP;
-    UDSend (temporary_buffer<uint8_t>&& buf, struct ibv_ah* ah, uint32_t qp) : 
+    UDSend (temporary_buffer<uint8_t>&& buf, struct ibv_ah* ah, uint32_t qp) :
         buffer(std::move(buf)), AH(ah), destQP(qp) {}
     UDSend() = delete;
 };
@@ -79,10 +79,19 @@ struct EndPoint {
     uint32_t UDQP;
     EndPoint(union ibv_gid gid, uint32_t qp) :
         GID(gid), UDQP(qp) {}
+    EndPoint(const sstring& strGID, uint32_t qp): GID{0}, UDQP(0) {
+        union ibv_gid gid{0};
+        if (StringToGID(strGID, gid) == 0) {
+            GID = gid;
+            UDQP = qp;
+        }
+    }
     EndPoint() = default;
     bool operator==(const EndPoint& rhs) const {
         return (GID == rhs.GID) && (UDQP == rhs.UDQP);
     }
+    static sstring GIDToString(union ibv_gid gid);
+    static int StringToGID(const sstring& strGID, union ibv_gid& result);
 };
 
 class RDMAConnectionError : std::exception {};
@@ -92,11 +101,21 @@ public:
     future<temporary_buffer<uint8_t>> recv();
     void send(std::vector<temporary_buffer<uint8_t>>&& buf);
 
-    RDMAConnection(RDMAStack* stack, EndPoint remote) : 
+    RDMAConnection(RDMAStack* stack, EndPoint remote) :
         stack(stack), remote(remote) {}
     ~RDMAConnection() noexcept;
     RDMAConnection(RDMAConnection&&) noexcept;
     RDMAConnection& operator=(RDMAConnection&&) noexcept;
+    bool closed() {
+        return errorState;
+    }
+    future<> close() {
+        //TODO make sure we flush queues before closing
+        return make_ready_future<>();
+    }
+    const EndPoint& getAddr() const {
+        return remote;
+    }
 private:
     bool isReady = false;
     bool errorState = false;
@@ -138,6 +157,8 @@ public:
     ~RDMAStack() noexcept;
 
     bool poller();
+    RDMAListener listen();
+
 private:
     compat::optional<reactor::poller> RDMAPoller;
     struct ibv_pd* protectionDomain = nullptr;
@@ -178,7 +199,7 @@ private:
 
     static constexpr uint32_t RCDataSize = 8192;
     static constexpr int maxExpectedConnections = 1024;
-    static constexpr int RCCQSize = RecvWRData::maxWR + 
+    static constexpr int RCCQSize = RecvWRData::maxWR +
             (maxExpectedConnections * (SendWRData::maxWR / SendWRData::signalThreshold));
     RecvWRData RCQPRRs;
     struct ibv_cq* RCCQ = nullptr;
@@ -199,6 +220,22 @@ private:
     friend class RDMAConnection;
 };
 
+class RDMAListener {
+    //TODO review entire class
+public:
+    RDMAListener():_rstack(0){}
+    RDMAListener(RDMAStack* rstack):_rstack(rstack) {}
+    ~RDMAListener() {}
+    future<RDMAConnection> accept() {
+        assert(_rstack);
+        return _rstack->accept();
+    }
+    future<> close() {
+        return make_ready_future<>();
+    }
+private:
+    RDMAStack* _rstack;
+}; // class RDMAListener
+
 } // namespace rdma
 } // namespace seastar
-

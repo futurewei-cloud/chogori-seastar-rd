@@ -5,6 +5,7 @@
 #include "Log.h"
 #include <seastar/net/rdma.hh>
 
+#include <arpa/inet.h>
 #include <infiniband/verbs.h>
 
 bool operator==(const union ibv_gid& lhs, const union ibv_gid& rhs) {
@@ -45,7 +46,7 @@ void RDMAConnection::makeQP() {
         errorState = true;
         return;
     }
-    
+
     // Step 3. Transition QP to INIT state
     struct ibv_qp_attr attr;
     memset(&attr, 0, sizeof(ibv_qp_attr));
@@ -56,7 +57,7 @@ void RDMAConnection::makeQP() {
         errorState = true;
         ibv_destroy_qp(QP);
         QP = nullptr;
-        return; 
+        return;
     }
     // end of slow core part
 
@@ -107,7 +108,7 @@ void RDMAConnection::completeHandshake(uint32_t remoteQP) {
     attr.rq_psn = 0;
     attr.max_dest_rd_atomic = 0;
     attr.min_rnr_timer = 2; // 0.02 millisecond
-    if (ibv_modify_qp(QP, &attr, IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU | 
+    if (ibv_modify_qp(QP, &attr, IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU |
                                  IBV_QP_RQ_PSN | IBV_QP_MAX_DEST_RD_ATOMIC |
                                  IBV_QP_MIN_RNR_TIMER | IBV_QP_DEST_QPN)) {
         K2ERROR("Failed to transition RC QP into RTR");
@@ -124,15 +125,15 @@ void RDMAConnection::completeHandshake(uint32_t remoteQP) {
     attr.retry_cnt = 2;
     attr.rnr_retry = 7; // infinite retry
     attr.max_rd_atomic = 0;
-    if (ibv_modify_qp(QP, &attr, IBV_QP_STATE | IBV_QP_SQ_PSN | 
-                                 IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT | 
+    if (ibv_modify_qp(QP, &attr, IBV_QP_STATE | IBV_QP_SQ_PSN |
+                                 IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT |
                                  IBV_QP_RNR_RETRY | IBV_QP_MAX_QP_RD_ATOMIC)) {
         K2ERROR("Failed to transition into RTS");
         errorState = true;
         ibv_destroy_qp(QP);
         QP = nullptr;
         return;
-    } 
+    }
     // End of slow core part
 
     isReady = true;
@@ -183,7 +184,7 @@ bool RDMAConnection::processSends(VecType& queue) {
     sendWRs.postedCount += toProcess;
     queue.erase(queue.cbegin(), queue.cbegin()+toProcess);
     return true;
-} 
+}
 
 future<temporary_buffer<uint8_t>> RDMAConnection::recv() {
     // TODO check for connection error state and return exception if needed
@@ -218,14 +219,14 @@ void RDMAConnection::incomingMessage(unsigned char* data, uint32_t size) {
 
 void RDMAConnection::send(std::vector<temporary_buffer<uint8_t>>&& buf) {
     if (!isReady || sendQueue.size()) {
-        sendQueue.insert(sendQueue.end(), std::make_move_iterator(buf.begin()), 
+        sendQueue.insert(sendQueue.end(), std::make_move_iterator(buf.begin()),
                          std::make_move_iterator(buf.end()));
         return;
     }
 
     processSends<std::vector<temporary_buffer<uint8_t>>>(buf);
     if (buf.size()) {
-        sendQueue.insert(sendQueue.end(), std::make_move_iterator(buf.begin()), 
+        sendQueue.insert(sendQueue.end(), std::make_move_iterator(buf.begin()),
                          std::make_move_iterator(buf.end()));
     }
 }
@@ -311,6 +312,10 @@ int initRDMAContext() {
 
     initialized = true;
     return 0;
+}
+
+RDMAListener RDMAStack::listen() {
+    return RDMAListener(this);
 }
 
 RDMAStack::~RDMAStack() {
@@ -475,7 +480,7 @@ bool RDMAStack::processUDSendQueue() {
     UDQPSRs.postedCount += toProcess;
     UDSendQueue.erase(UDSendQueue.cbegin(), UDSendQueue.cbegin()+toProcess);
     return true;
-} 
+}
 
 void RDMAStack::processCompletedSRs(std::array<temporary_buffer<uint8_t>, SendWRData::maxWR>& buffers, SendWRData& WRData, uint64_t signaledID) {
     uint32_t freed=0;
@@ -667,7 +672,7 @@ void RDMAStack::registerPoller() {
 std::unique_ptr<RDMAStack> RDMAStack::makeUDQP(std::unique_ptr<RDMAStack> stack) {
     // Step 1. Create a CQ
     stack->UDCQ = ibv_create_cq(ctx, RecvWRData::maxWR+SendWRData::maxWR, nullptr, nullptr, 0);
-    if (!stack->UDCQ) { 
+    if (!stack->UDCQ) {
         K2ERROR("failed to create UDCQ");
         return std::unique_ptr<RDMAStack>(nullptr);
     }
@@ -718,7 +723,7 @@ std::unique_ptr<RDMAStack> RDMAStack::makeUDQP(std::unique_ptr<RDMAStack> stack)
         SG.lkey = stack->memRegionHandle->lkey;
         RR.sg_list = &SG;
         RR.num_sge = 1;
-    } 
+    }
     struct ibv_recv_wr* badRR;
     if (ibv_post_recv(stack->UDQP, stack->UDQPRRs.RecvRequests, &badRR)) {
         K2ERROR("Failed to post UD QP RRs");
@@ -818,7 +823,7 @@ std::unique_ptr<RDMAStack> RDMAStack::makeRDMAStack(void* memRegion, size_t memR
         SG.lkey = stack->memRegionHandle->lkey;
         RR.sg_list = &SG;
         RR.num_sge = 1;
-    } 
+    }
     struct ibv_recv_wr* badRR;
     if (ibv_post_srq_recv(stack->SRQ, stack->RCQPRRs.RecvRequests, &badRR)) {
         K2ERROR("failed to post SRQ RRs");
@@ -826,10 +831,27 @@ std::unique_ptr<RDMAStack> RDMAStack::makeRDMAStack(void* memRegion, size_t memR
     }
 
     stack->registerPoller();
-    
+
     return stack;
+}
+
+sstring EndPoint::GIDToString(union ibv_gid gid) {
+    char buffer[INET6_ADDRSTRLEN];
+    buffer[0] = '\0';
+    static_assert(sizeof(struct in6_addr) == sizeof(union ibv_gid));
+    // parse the gid as an ipv6
+    ::inet_ntop(AF_INET6, &gid.raw, buffer, INET6_ADDRSTRLEN);
+    return sstring(buffer);
+}
+
+int EndPoint::StringToGID(const sstring& strGID, union ibv_gid& result) {
+    static_assert(sizeof(struct in6_addr) == sizeof(union ibv_gid));
+    // use ipv6 parser
+    if (::inet_pton(AF_INET6, strGID.c_str(), &result.raw) != 1) {
+        return -1;
+    }
+    return 0;
 }
 
 } // namespace rdma
 } // namespace seastar
-
