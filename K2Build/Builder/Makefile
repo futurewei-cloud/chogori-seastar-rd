@@ -1,6 +1,6 @@
 # build the image
 include ../DFV_K2_BuildDeps/DockerMake.base
-IMG_NAME=k2seastar_builder
+IMG_NAME=k2seastar_builder_justin
 DEP_IMAGES=$(DOCKER_REGISTRY)/k2builder:latest
 
 all: img_build

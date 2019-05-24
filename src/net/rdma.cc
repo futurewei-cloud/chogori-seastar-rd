@@ -848,17 +848,16 @@ std::unique_ptr<RDMAStack> RDMAStack::makeRDMAStack(void* memRegion, size_t memR
     return stack;
 }
 
-sstring GIDToString(union ibv_gid gid) {
+sstring EndPoint::GIDToString(union ibv_gid gid) {
     char buffer[INET6_ADDRSTRLEN];
     buffer[0] = '\0';
     static_assert(sizeof(struct in6_addr) == sizeof(union ibv_gid));
-    assert(sizeof(struct in6_addr) == sizeof(union ibv_gid));
     // parse the gid as an ipv6
     ::inet_ntop(AF_INET6, &gid.raw, buffer, INET6_ADDRSTRLEN);
     return sstring(buffer);
 }
 
-int StringToGID(const sstring& strGID, union ibv_gid& result) {
+int EndPoint::StringToGID(const sstring& strGID, union ibv_gid& result) {
     static_assert(sizeof(struct in6_addr) == sizeof(union ibv_gid));
     // use ipv6 parser
     if (::inet_pton(AF_INET6, strGID.c_str(), &result.raw) != 1) {

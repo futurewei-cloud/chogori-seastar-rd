@@ -39,6 +39,13 @@ package: install
 	@cd ../ && fpm $(DEPEND_FLAGS) -s dir -t deb --deb-generate-changes -n libseastar-k2 -f -m k2 -a amd64 -v $(package_version) --deb-dist stable --description "Seastar k2 package http://rnd-github-usa-g.huawei.com/SeattleCloudBU/DFV_K2_SeaStar/" -C $(BUILD_DIR)/install
 	@cd ../ && fpm -s dir -t rpm -n libseastar-k2 -f -m k2 -a amd64 -v $(package_version) --rpm-dist stable --description "Seastar k2 package http://rnd-github-usa-g.huawei.com/SeattleCloudBU/DFV_K2_SeaStar/" -C $(BUILD_DIR)/install
 
+package_push:
+	@echo ">>> Pushing packages"
+	@curl http://k2-bvu-10001.huawei.com:10080/incoming/ --upload-file libseastar-k2_*.deb
+    @curl http://k2-bvu-10001.huawei.com:10080/incoming/ --upload-file libseastar-k2_*.changes
+	@curl http://k2-bvu-10001.huawei.com:10070/ --upload-file libseastar-k2-*.rpm
+    @curl http://k2-bvu-10001.huawei.com:10070/commit
+
 builder_img_build:
 	@$(MAKE) -C Builder
 
