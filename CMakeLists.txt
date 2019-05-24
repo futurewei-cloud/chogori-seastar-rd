@@ -241,9 +241,11 @@ find_package (lz4 1.7.3 REQUIRED)
 ## Private and private/public dependencies.
 ##
 
+find_package (Threads REQUIRED)
 find_package (Concepts)
 find_package (GnuTLS 3.3.26 REQUIRED)
 find_package (LinuxMembarrier)
+find_package (Sanitizers)
 find_package (Protobuf 2.5.0 REQUIRED)
 find_package (StdAtomic REQUIRED)
 set (StdFilesystem_CXX_DIALECT ${Seastar_CXX_DIALECT})
@@ -609,6 +611,7 @@ target_link_libraries (seastar
     cryptopp::cryptopp
     fmt::fmt
     lz4::lz4
+    Threads::Threads
   PRIVATE
     ${CMAKE_DL_LIBS}
     Boost::filesystem
@@ -958,6 +961,7 @@ if (Seastar_INSTALL)
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindGnuTLS.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindLinuxMembarrier.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindProtobuf.cmake
+      ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindSanitizers.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindStdAtomic.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindStdFilesystem.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Findc-ares.cmake

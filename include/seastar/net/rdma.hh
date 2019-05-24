@@ -105,8 +105,8 @@ public:
     RDMAConnection(RDMAStack* stack, EndPoint remote) :
         stack(stack), remote(remote) {}
     ~RDMAConnection() noexcept;
-    RDMAConnection(RDMAConnection&&) noexcept;
-    RDMAConnection& operator=(RDMAConnection&&) noexcept;
+    RDMAConnection(RDMAConnection&&) = delete;
+    RDMAConnection& operator=(RDMAConnection&&) = delete;
     bool closed() {
         return errorState;
     }
@@ -150,8 +150,8 @@ class RDMAStack {
 public:
     EndPoint localEndpoint;
 
-    future<RDMAConnection> accept();
-    RDMAConnection connect(const EndPoint& remote);
+    future<std::unique_ptr<RDMAConnection>> accept();
+    std::unique_ptr<RDMAConnection> connect(const EndPoint& remote);
 
     static std::unique_ptr<RDMAStack> makeRDMAStack(void* memRegion, size_t memRegionSize);
     RDMAStack() = default;
@@ -177,7 +177,8 @@ private:
         uint32_t requestId;
     };
     // There is a 40 byte overhead for UD
-    static constexpr size_t UDQPRxSize = sizeof(UDMessage) + 40;
+    //static constexpr size_t UDQPRxSize = sizeof(UDMessage) + 40;
+    static constexpr size_t UDQPRxSize = 256;
     RecvWRData UDQPRRs;
     SendWRData UDQPSRs;
     std::array<temporary_buffer<uint8_t>, SendWRData::maxWR> UDOutstandingBuffers;
@@ -212,8 +213,8 @@ private:
     void registerPoller();
 
     bool acceptPromiseActive = false;
-    promise<RDMAConnection> acceptPromise;
-    std::vector<RDMAConnection> acceptQueue;
+    promise<std::unique_ptr<RDMAConnection>> acceptPromise;
+    std::vector<std::unique_ptr<RDMAConnection>> acceptQueue;
 
     //TODO move to slow core
     struct ibv_ah* makeAH(const union ibv_gid& GID);
@@ -227,7 +228,7 @@ public:
     RDMAListener():_rstack(0){}
     RDMAListener(RDMAStack* rstack):_rstack(rstack) {}
     ~RDMAListener() {}
-    future<RDMAConnection> accept() {
+    future<std::unique_ptr<RDMAConnection>> accept() {
         assert(_rstack);
         return _rstack->accept();
     }

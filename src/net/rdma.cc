@@ -240,6 +240,7 @@ RDMAConnection::~RDMAConnection() noexcept {
     }
 }
 
+/*
 RDMAConnection::RDMAConnection(RDMAConnection&& conn) noexcept {
     isReady = conn.isReady;
     errorState = conn.errorState;
@@ -277,6 +278,7 @@ RDMAConnection& RDMAConnection::operator=(RDMAConnection&& conn) noexcept {
 
     return *this;
 }
+*/
 
 int initRDMAContext() {
     if (initialized) {
@@ -493,33 +495,33 @@ void RDMAStack::processCompletedSRs(std::array<temporary_buffer<uint8_t>, SendWR
     WRData.postedCount -= freed;
 }
 
-future<RDMAConnection> RDMAStack::accept() {
+future<std::unique_ptr<RDMAConnection>> RDMAStack::accept() {
     if (acceptPromiseActive) {
         throw RDMAConnectionError();
     }
 
     if (acceptQueue.size()) {
-        RDMAConnection conn = std::move(acceptQueue.back());
+        std::unique_ptr<RDMAConnection> conn = std::move(acceptQueue.back());
         acceptQueue.pop_back();
-        return make_ready_future<RDMAConnection>(std::move(conn));
+        return make_ready_future<std::unique_ptr<RDMAConnection>>(std::move(conn));
     }
 
     acceptPromiseActive = true;
-    acceptPromise = promise<RDMAConnection>();
+    acceptPromise = promise<std::unique_ptr<RDMAConnection>>();
     return acceptPromise.get_future();
 }
 
-RDMAConnection RDMAStack::connect(const EndPoint& remote) {
-    RDMAConnection conn(this, remote);
-    conn.makeHandshakeRequest();
+std::unique_ptr<RDMAConnection> RDMAStack::connect(const EndPoint& remote) {
+    std::unique_ptr<RDMAConnection> conn = std::make_unique<RDMAConnection>(this, remote);
+    conn->makeHandshakeRequest();
     return conn;
 }
 
 void RDMAStack::processUDMessage(UDMessage* message, EndPoint remote) {
     if (message->op == UDOps::HandshakeRequest) {
-        RDMAConnection conn(this, remote);
-        handshakeLookup[message->requestId] = conn.weak_from_this();
-        conn.processHandshakeRequest(message->QPNum, message->requestId);
+        std::unique_ptr<RDMAConnection> conn = std::make_unique<RDMAConnection>(this, remote);
+        handshakeLookup[message->requestId] = conn->weak_from_this();
+        conn->processHandshakeRequest(message->QPNum, message->requestId);
 
         if (acceptPromiseActive) {
             acceptPromiseActive = false;
@@ -529,12 +531,18 @@ void RDMAStack::processUDMessage(UDMessage* message, EndPoint remote) {
         }
     } else if (message->op == UDOps::HandshakeResponse) {
         auto connIt = handshakeLookup.find(message->requestId);
-        if (connIt == handshakeLookup.end() || !connIt->second) {
+        if (connIt == handshakeLookup.end()) {
             K2WARN("Unsolicited Handshake response");
+            return;
+        }
+        else if (!connIt->second) {
+            K2WARN("Connection deleted before handshake completed");
+            handshakeLookup.erase(connIt);
             return;
         }
 
         connIt->second->completeHandshake(message->QPNum);
+        handshakeLookup.erase(connIt);
     } else {
         K2ASSERT(false, "Unknown UD op");
     }
@@ -563,6 +571,7 @@ bool RDMAStack::processRCCQ() {
             foundConn = false;
         }
 
+        // TODO opcodes are not valid if there is an error, fix handling
         if (WCs[i].opcode == IBV_WC_SEND) {
             // We can ignore send completions for connections that no longer exist
             if (!foundConn) {
@@ -628,6 +637,7 @@ bool RDMAStack::processUDCQ() {
         return false;
     }
 
+    // TODO opcodes are not valid if there is an error, fix handling
     for (int i=0; i<completed; ++i) {
         if (WCs[i].opcode == IBV_WC_SEND) {
             processCompletedSRs(UDOutstandingBuffers, UDQPSRs, WCs[i].wr_id);
@@ -639,6 +649,7 @@ bool RDMAStack::processUDCQ() {
 
             if (WCs[i].status != IBV_WC_SUCCESS) {
                 K2WARN("error on UD recv wc");
+                K2WARN(ibv_wc_status_str(WCs[i].status));
             } else {
                 UDMessage* message = (UDMessage*)(UDQPRRs.Segments[idx].addr+40);
                 struct ibv_grh* grh = (struct ibv_grh*)UDQPRRs.Segments[idx].addr;
@@ -755,6 +766,8 @@ std::unique_ptr<RDMAStack> RDMAStack::makeUDQP(std::unique_ptr<RDMAStack> stack)
         SR.num_sge = 1;
         SR.opcode = IBV_WR_SEND;
         SR.wr.ud.remote_qkey = 0;
+
+        stack->UDQPSRs.Segments[i].lkey = stack->memRegionHandle->lkey;
     }
 
     stack->localEndpoint.UDQP = stack->UDQP->qp_num;
