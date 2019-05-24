@@ -9,6 +9,7 @@
 #include <seastar/core/reactor.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/weak_ptr.hh>
+#include <seastar/core/sstring.hh>
 
 #include <infiniband/verbs.h>
 
