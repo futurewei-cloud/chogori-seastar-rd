@@ -108,6 +108,7 @@ disable_abort_on_alloc_failure_temporarily::~disable_abort_on_alloc_failure_temp
 #include <cstring>
 #include <boost/intrusive/list.hpp>
 #include <sys/mman.h>
+#include <linux/mman.h>
 #include <seastar/util/defer.hh>
 #include <seastar/util/backtrace.hh>
 
@@ -456,6 +457,14 @@ struct cpu_pages {
 static thread_local cpu_pages cpu_mem;
 std::atomic<unsigned> cpu_pages::cpu_id_gen;
 cpu_pages* cpu_pages::all_cpus[max_cpus];
+
+char* getMemRegionStart() {
+    return cpu_mem.memory;
+}
+
+size_t getMemRegionSize() {
+    return cpu_mem.nr_pages * page_size;
+}
 
 void set_heap_profiling_enabled(bool enable) {
     bool is_enabled = cpu_mem.collect_backtrace;
@@ -883,7 +892,7 @@ bool cpu_pages::initialize() {
     if (r == MAP_FAILED) {
         abort();
     }
-    ::madvise(base, size, MADV_HUGEPAGE);
+
     pages = reinterpret_cast<page*>(base);
     memory = base;
     nr_pages = size / page_size;
@@ -909,16 +918,11 @@ allocate_anonymous_memory(compat::optional<void*> where, size_t how_much) {
 }
 
 mmap_area
-allocate_hugetlbfs_memory(file_desc& fd, compat::optional<void*> where, size_t how_much) {
-    auto pos = fd.size();
-    fd.truncate(pos + how_much);
-    auto ret = fd.map(
+allocate_hugetlbfs_memory(compat::optional<void*> where, size_t how_much) {
+    return mmap_anonymous(where.value_or(nullptr),
             how_much,
             PROT_READ | PROT_WRITE,
-            MAP_SHARED | MAP_POPULATE | (where ? MAP_FIXED : 0),
-            pos,
-            where.value_or(nullptr));
-    return ret;
+            MAP_PRIVATE | MAP_POPULATE | MAP_HUGETLB | MAP_HUGE_2MB | (where ? MAP_FIXED : 0));
 }
 
 void cpu_pages::replace_memory_backing(allocate_system_memory_fn alloc_sys_mem) {
@@ -977,7 +981,6 @@ void cpu_pages::do_resize(size_t new_size, allocate_system_memory_fn alloc_sys_m
     auto mmap_size = new_size - old_size;
     auto mem = alloc_sys_mem({mmap_start}, mmap_size);
     mem.release();
-    ::madvise(mmap_start, mmap_size, MADV_HUGEPAGE);
     // one past last page structure is a sentinel
     auto new_page_array_pages = align_up(sizeof(page[new_pages + 1]), page_size) / page_size;
     auto new_page_array
@@ -1340,19 +1343,15 @@ void disable_large_allocation_warning() {
     cpu_mem.large_allocation_warning_threshold = std::numeric_limits<size_t>::max();
 }
 
-void configure(std::vector<resource::memory> m, bool mbind,
-        optional<std::string> hugetlbfs_path) {
+void configure(std::vector<resource::memory> m, bool mbind, bool hugepages) {
     size_t total = 0;
     for (auto&& x : m) {
         total += x.bytes;
     }
     allocate_system_memory_fn sys_alloc = allocate_anonymous_memory;
-    if (hugetlbfs_path) {
-        // std::function is copyable, but file_desc is not, so we must use
-        // a shared_ptr to allow sys_alloc to be copied around
-        auto fdp = make_lw_shared<file_desc>(file_desc::temporary(*hugetlbfs_path));
-        sys_alloc = [fdp] (optional<void*> where, size_t how_much) {
-            return allocate_hugetlbfs_memory(*fdp, where, how_much);
+    if (hugepages) {
+        sys_alloc = [] (optional<void*> where, size_t how_much) {
+            return allocate_hugetlbfs_memory(where, how_much);
         };
         cpu_mem.replace_memory_backing(sys_alloc);
     }
@@ -1377,7 +1376,7 @@ void configure(std::vector<resource::memory> m, bool mbind,
 #endif
         pos += x.bytes;
     }
-    if (hugetlbfs_path) {
+    if (hugepages) {
         cpu_mem.init_virt_to_phys_map();
     }
 }
@@ -1847,7 +1846,7 @@ reclaimer::~reclaimer() {
 void set_reclaim_hook(std::function<void (std::function<void ()>)> hook) {
 }
 
-void configure(std::vector<resource::memory> m, bool mbind, compat::optional<std::string> hugepages_path) {
+void configure(std::vector<resource::memory> m, bool mbind, bool hugepages) {
 }
 
 statistics stats() {

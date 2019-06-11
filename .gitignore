@@ -4,6 +4,9 @@
 build
 build.ninja
 cscope.*
+*.changes
+*.rpm
+*.deb
 __pycache__/
 cmake/Cooking.cmake
 .cooking_memory

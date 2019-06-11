@@ -131,6 +131,9 @@ void register_network_stack(sstring name, boost::program_options::options_descri
 
 class thread_pool;
 class smp;
+namespace rdma {
+class RDMAStack;
+}
 
 class smp_message_queue {
     static constexpr size_t queue_length = 128;
@@ -369,6 +372,8 @@ public:
         uint64_t fstream_read_aheads_discarded = 0;
         uint64_t fstream_read_ahead_discarded_bytes = 0;
     };
+
+    std::unique_ptr<rdma::RDMAStack> _rdma_stack;
 private:
     file_desc _notify_eventfd;
     file_desc _task_quota_timer;
@@ -842,6 +847,8 @@ public:
     static void arrive_at_event_loop_end();
     static void join_all();
     static bool main_thread() { return std::this_thread::get_id() == _tmain; }
+
+    static std::string _rdma_device;
 
     /// Runs a function on a remote core.
     ///

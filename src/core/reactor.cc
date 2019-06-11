@@ -32,6 +32,7 @@
 #include <seastar/core/memory.hh>
 #include <seastar/core/posix.hh>
 #include <seastar/net/packet.hh>
+#include <seastar/net/rdma.hh>
 #include <seastar/net/stack.hh>
 #include <seastar/net/posix-stack.hh>
 #include <seastar/net/native-stack.hh>
@@ -1776,8 +1777,9 @@ reactor::posix_listen(socket_address sa, listen_options opts) {
 
 bool
 reactor::posix_reuseport_detect() {
-    return false; // FIXME: reuseport currently leads to heavy load imbalance. Until we fix that, just
-                  // disable it unconditionally.
+    // "true" here is needed to support listening on different ports on differet cores, but
+    // according to seastar it will cause imbalance if listening on the same port on different cores
+    return true;
     try {
         file_desc fd = file_desc::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
         fd.setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
@@ -4045,6 +4047,13 @@ int reactor::run() {
        _signals.handle_signal_once(SIGTERM, [this] { stop(); });
     }
 
+    if (smp::_rdma_device != "") {
+        _rdma_stack = rdma::RDMAStack::makeRDMAStack(memory::getMemRegionStart(), memory::getMemRegionSize());
+        if (!_rdma_stack) {
+            fmt::print("warning: failed to initialize rdma stack\n");
+        }
+    }
+
     _cpu_started.wait(smp::count).then([this] {
         _network_stack->initialize().then([this] {
             _start_promise.set_value();
@@ -4700,6 +4709,7 @@ reactor::get_options_description(std::chrono::duration<double> default_task_quot
                 "idle polling time in microseconds (reduce for overprovisioned environments or laptops)")
         ("poll-aio", bpo::value<bool>()->default_value(true),
                 "busy-poll for disk I/O (reduces latency and increases throughput)")
+        ("rdma", bpo::value<std::string>()->default_value(""), "Enable the rdma network stack with the specified rdma device name")
         ("task-quota-ms", bpo::value<double>()->default_value(default_task_quota / 1ms), "Max time (ms) between polls")
         ("max-task-backlog", bpo::value<unsigned>()->default_value(1000), "Maximum number of task backlog to allow; above this we ignore I/O")
         ("blocked-reactor-notify-ms", bpo::value<unsigned>()->default_value(2000), "threshold in miliseconds over which the reactor is considered blocked if no progress is made")
@@ -4731,7 +4741,7 @@ smp::get_options_description()
         ("cpuset", bpo::value<cpuset_bpo_wrapper>(), "CPUs to use (in cpuset(7) format; default: all))")
         ("memory,m", bpo::value<std::string>(), "memory to use, in bytes (ex: 4G) (default: all)")
         ("reserve-memory", bpo::value<std::string>(), "memory reserved to OS (if --memory not specified)")
-        ("hugepages", bpo::value<std::string>(), "path to accessible hugetlbfs mount (typically /dev/hugepages/something)")
+        ("hugepages", "Enabled 2MB hugepages from hugetlbfs")
         ("lock-memory", bpo::value<bool>(), "lock all memory (prevents swapping)")
         ("thread-affinity", bpo::value<bool>()->default_value(true), "pin threads to their cpus (disable for overprovisioning)")
 #ifdef SEASTAR_HAVE_HWLOC
@@ -4773,6 +4783,7 @@ std::unique_ptr<smp_message_queue*[], smp::qs_deleter> smp::_qs;
 std::thread::id smp::_tmain;
 unsigned smp::count = 1;
 bool smp::_using_dpdk;
+std::string smp::_rdma_device;
 
 void smp::start_all_queues()
 {
@@ -5074,6 +5085,7 @@ void smp::configure(boost::program_options::variables_map configuration)
 #ifdef SEASTAR_HAVE_DPDK
     _using_dpdk = configuration.count("dpdk-pmd");
 #endif
+    _rdma_device = configuration["rdma"].as<std::string>();
     auto thread_affinity = configuration["thread-affinity"].as<bool>();
     if (configuration.count("overprovisioned")
            && configuration["thread-affinity"].defaulted()) {
@@ -5130,9 +5142,7 @@ void smp::configure(boost::program_options::variables_map configuration)
     if (configuration.count("memory")) {
         rc.total_memory = parse_memory_size(configuration["memory"].as<std::string>());
 #ifdef SEASTAR_HAVE_DPDK
-        if (configuration.count("hugepages") &&
-            !configuration["network-stack"].as<std::string>().compare("native") &&
-            _using_dpdk) {
+        if (configuration.count("hugepages") && _using_dpdk) {
             size_t dpdk_memory = dpdk::eal::mem_size(smp::count);
 
             if (dpdk_memory >= rc.total_memory) {
@@ -5153,10 +5163,7 @@ void smp::configure(boost::program_options::variables_map configuration)
     if (configuration.count("reserve-memory")) {
         rc.reserve_memory = parse_memory_size(configuration["reserve-memory"].as<std::string>());
     }
-    compat::optional<std::string> hugepages_path;
-    if (configuration.count("hugepages")) {
-        hugepages_path = configuration["hugepages"].as<std::string>();
-    }
+
     auto mlock = false;
     if (configuration.count("lock-memory")) {
         mlock = configuration["lock-memory"].as<bool>();
@@ -5167,6 +5174,11 @@ void smp::configure(boost::program_options::variables_map configuration)
             // Don't hard fail for now, it's hard to get the configuration right
             fmt::print("warning: failed to mlockall: {}\n", strerror(errno));
         }
+    }
+
+    bool hugepages = false;
+    if (configuration.count("hugepages")) {
+        hugepages = true;
     }
 
     rc.cpus = smp::count;
@@ -5183,7 +5195,7 @@ void smp::configure(boost::program_options::variables_map configuration)
     if (thread_affinity) {
         smp::pin(allocations[0].cpu_id);
     }
-    memory::configure(allocations[0].mem, mbind, hugepages_path);
+    memory::configure(allocations[0].mem, mbind, hugepages);
 
     if (configuration.count("abort-on-seastar-bad-alloc")) {
         memory::enable_abort_on_allocation_failure();
@@ -5201,6 +5213,10 @@ void smp::configure(boost::program_options::variables_map configuration)
         dpdk::eal::init(cpus, configuration);
     }
 #endif
+
+    if (smp::_rdma_device != "") {
+        rdma::initRDMAContext(smp::_rdma_device);
+    }
 
     // Better to put it into the smp class, but at smp construction time
     // correct smp::count is not known.
@@ -5250,13 +5266,13 @@ void smp::configure(boost::program_options::variables_map configuration)
     unsigned i;
     for (i = 1; i < smp::count; i++) {
         auto allocation = allocations[i];
-        create_thread([configuration, &disk_config, hugepages_path, i, allocation, assign_io_queue, alloc_io_queue, thread_affinity, heapprof_enabled, mbind, backend_selector] {
+        create_thread([configuration, &disk_config, hugepages, i, allocation, assign_io_queue, alloc_io_queue, thread_affinity, heapprof_enabled, mbind, backend_selector] {
             auto thread_name = seastar::format("reactor-{}", i);
             pthread_setname_np(pthread_self(), thread_name.c_str());
             if (thread_affinity) {
                 smp::pin(allocation.cpu_id);
             }
-            memory::configure(allocation.mem, mbind, hugepages_path);
+            memory::configure(allocation.mem, mbind, hugepages);
             memory::set_heap_profiling_enabled(heapprof_enabled);
             sigset_t mask;
             sigfillset(&mask);

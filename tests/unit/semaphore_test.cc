@@ -35,7 +35,7 @@
 
 using namespace seastar;
 using namespace std::chrono_literals;
-
+auto constexpr TIME_UNIT = 20ms;
 
 SEASTAR_TEST_CASE(test_semaphore_consume) {
     semaphore sem(0);
@@ -58,7 +58,7 @@ SEASTAR_TEST_CASE(test_semaphore_1) {
             x.second++;
         });
         x.first.signal();
-        return sleep(10ms).then([&x] {
+        return sleep(TIME_UNIT).then([&x] {
             BOOST_REQUIRE_EQUAL(x.second, 1);
         });
     });
@@ -69,7 +69,7 @@ SEASTAR_TEST_CASE(test_semaphore_2) {
         x.first.wait().then([&x] {
             x.second++;
         });
-        return sleep(10ms).then([&x] {
+        return sleep(TIME_UNIT).then([&x] {
             BOOST_REQUIRE_EQUAL(x.second, 0);
         });
     });
@@ -77,13 +77,13 @@ SEASTAR_TEST_CASE(test_semaphore_2) {
 
 SEASTAR_TEST_CASE(test_semaphore_timeout_1) {
     return do_with(std::make_pair(semaphore(0), 0), [] (std::pair<semaphore, int>& x) {
-        x.first.wait(10ms).then([&x] {
+        x.first.wait(3*TIME_UNIT).then([&x] {
             x.second++;
         });
-        sleep(3ms).then([&x] {
+        sleep(TIME_UNIT).then([&x] {
             x.first.signal();
         });
-        return sleep(20ms).then([&x] {
+        return sleep(2*TIME_UNIT).then([&x] {
             BOOST_REQUIRE_EQUAL(x.second, 1);
         });
     });
@@ -91,13 +91,13 @@ SEASTAR_TEST_CASE(test_semaphore_timeout_1) {
 
 SEASTAR_TEST_CASE(test_semaphore_timeout_2) {
     return do_with(std::make_pair(semaphore(0), 0), [] (std::pair<semaphore, int>& x) {
-        x.first.wait(3ms).then([&x] {
+        x.first.wait(TIME_UNIT).then([&x] {
             x.second++;
         });
-        sleep(10ms).then([&x] {
+        sleep(2*TIME_UNIT).then([&x] {
             x.first.signal();
         });
-        return sleep(20ms).then([&x] {
+        return sleep(3*TIME_UNIT).then([&x] {
             BOOST_REQUIRE_EQUAL(x.second, 0);
         });
     });
@@ -105,16 +105,16 @@ SEASTAR_TEST_CASE(test_semaphore_timeout_2) {
 
 SEASTAR_TEST_CASE(test_semaphore_mix_1) {
     return do_with(std::make_pair(semaphore(0), 0), [] (std::pair<semaphore, int>& x) {
-        x.first.wait(3ms).then([&x] {
+        x.first.wait(TIME_UNIT).then([&x] {
             x.second++;
         });
         x.first.wait().then([&x] {
             x.second = 10;
         });
-        sleep(10ms).then([&x] {
+        sleep(2*TIME_UNIT).then([&x] {
             x.first.signal();
         });
-        return sleep(20ms).then([&x] {
+        return sleep(3*TIME_UNIT).then([&x] {
             BOOST_REQUIRE_EQUAL(x.second, 10);
         });
     });
@@ -149,7 +149,7 @@ SEASTAR_TEST_CASE(test_shared_mutex_exclusive) {
             return with_lock(sm, [&counter] {
                 BOOST_REQUIRE_EQUAL(counter, 0u);
                 ++counter;
-                return sleep(10ms).then([&counter] {
+                return sleep(TIME_UNIT).then([&counter] {
                     --counter;
                     BOOST_REQUIRE_EQUAL(counter, 0u);
                 });
@@ -163,7 +163,7 @@ SEASTAR_TEST_CASE(test_shared_mutex_shared) {
         auto running_in_parallel = [&sm, &counter] (int instance) {
             return with_shared(sm, [&counter] {
                 ++counter;
-                return sleep(10ms).then([&counter] {
+                return sleep(TIME_UNIT).then([&counter] {
                     bool was_parallel = counter != 0;
                     --counter;
                     return was_parallel;
@@ -182,7 +182,7 @@ SEASTAR_TEST_CASE(test_shared_mutex_mixed) {
         auto running_in_parallel = [&sm, &counter] (int instance) {
             return with_shared(sm, [&counter] {
                 ++counter;
-                return sleep(10ms).then([&counter] {
+                return sleep(TIME_UNIT).then([&counter] {
                     bool was_parallel = counter != 0;
                     --counter;
                     return was_parallel;
@@ -193,7 +193,7 @@ SEASTAR_TEST_CASE(test_shared_mutex_mixed) {
             return with_lock(sm, [&counter] {
                 BOOST_REQUIRE_EQUAL(counter, 0u);
                 ++counter;
-                return sleep(10ms).then([&counter] {
+                return sleep(TIME_UNIT).then([&counter] {
                     --counter;
                     BOOST_REQUIRE_EQUAL(counter, 0u);
                     return true;

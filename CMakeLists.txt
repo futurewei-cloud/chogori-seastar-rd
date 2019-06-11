@@ -76,6 +76,7 @@ set (CMAKE_SHARED_LINKER_FLAGS_DEV
   "Flags used by the shared libraries linker during builds."
   FORCE)
 
+
 mark_as_advanced (
     CMAKE_CXX_FLAGS_DEV
     CMAKE_C_FLAGS_DEV
@@ -240,9 +241,11 @@ find_package (lz4 1.7.3 REQUIRED)
 ## Private and private/public dependencies.
 ##
 
+find_package (Threads REQUIRED)
 find_package (Concepts)
 find_package (GnuTLS 3.3.26 REQUIRED)
 find_package (LinuxMembarrier)
+find_package (Sanitizers)
 find_package (Protobuf 2.5.0 REQUIRED)
 find_package (StdAtomic REQUIRED)
 set (StdFilesystem_CXX_DIALECT ${Seastar_CXX_DIALECT})
@@ -255,6 +258,8 @@ find_package (numactl)
 find_package (ragel 6.10 REQUIRED)
 find_package (rt REQUIRED)
 find_package (yaml-cpp 0.5.1 REQUIRED)
+
+find_library(VERBS ibverbs REQUIRED)
 
 #
 # Code generation helpers.
@@ -455,6 +460,7 @@ add_library (seastar STATIC
   include/seastar/net/dhcp.hh
   include/seastar/net/dns.hh
   include/seastar/net/dpdk.hh
+  include/seastar/net/rdma.hh
   include/seastar/net/ethernet.hh
   include/seastar/net/inet_address.hh
   include/seastar/net/ip.hh
@@ -543,6 +549,7 @@ add_library (seastar STATIC
   src/net/dhcp.cc
   src/net/dns.cc
   src/net/dpdk.cc
+  src/net/rdma.cc
   src/net/ethernet.cc
   src/net/inet_address.cc
   src/net/ip.cc
@@ -604,6 +611,7 @@ target_link_libraries (seastar
     cryptopp::cryptopp
     fmt::fmt
     lz4::lz4
+    Threads::Threads
   PRIVATE
     ${CMAKE_DL_LIBS}
     Boost::filesystem
@@ -613,7 +621,8 @@ target_link_libraries (seastar
     lksctp-tools::lksctp-tools
     protobuf::libprotobuf
     rt::rt
-    yaml-cpp::yaml-cpp)
+    yaml-cpp::yaml-cpp
+    "${VERBS}")
 
 #
 # We want asserts enabled on all modes, but cmake defaults to passing
@@ -952,6 +961,7 @@ if (Seastar_INSTALL)
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindGnuTLS.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindLinuxMembarrier.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindProtobuf.cmake
+      ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindSanitizers.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindStdAtomic.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindStdFilesystem.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Findc-ares.cmake

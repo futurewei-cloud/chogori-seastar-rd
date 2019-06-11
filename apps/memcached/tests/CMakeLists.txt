@@ -26,21 +26,21 @@ else ()
   set (memcached_test_args "")
 endif ()
 
-add_custom_target (app_memcached_test_memcached_run
-  DEPENDS
-    ${memcached_app}
-    ${CMAKE_CURRENT_SOURCE_DIR}/test.py
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_memcached.py
-  COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/test.py --memcached $<TARGET_FILE:app_memcached> ${memcached_test_args}
-  USES_TERMINAL)
-
-add_test (
-  NAME Seastar.app.memcached.memcached
-  COMMAND ${CMAKE_COMMAND} --build ${Seastar_BINARY_DIR} --target app_memcached_test_memcached_run)
-
-set_tests_properties (Seastar.app.memcached.memcached
-  PROPERTIES
-    TIMEOUT ${Seastar_TEST_TIMEOUT})
+#add_custom_target (app_memcached_test_memcached_run
+#  DEPENDS
+#    ${memcached_app}
+#    ${CMAKE_CURRENT_SOURCE_DIR}/test.py
+#    ${CMAKE_CURRENT_SOURCE_DIR}/test_memcached.py
+#  COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/test.py --memcached $<TARGET_FILE:app_memcached> ${memcached_test_args}
+#  USES_TERMINAL)
+#
+#add_test (
+#  NAME Seastar.app.memcached.memcached
+#  COMMAND ${CMAKE_COMMAND} --build ${Seastar_BINARY_DIR} --target app_memcached_test_memcached_run)
+#
+#set_tests_properties (Seastar.app.memcached.memcached
+#  PROPERTIES
+#    TIMEOUT ${Seastar_TEST_TIMEOUT})
 
 add_executable (app_memcached_test_ascii
   test_ascii_parser.cc)
