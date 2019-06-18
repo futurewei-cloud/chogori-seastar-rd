@@ -9,6 +9,8 @@
 
 #include "Log.h"
 #include <seastar/net/rdma.hh>
+#include <seastar/core/metrics_registration.hh> // metrics
+#include <seastar/core/metrics.hh>
 
 #include <arpa/inet.h>
 #include <infiniband/verbs.h>
@@ -147,7 +149,7 @@ void RDMAConnection::completeHandshake(uint32_t remoteQP) {
     attr.dest_qp_num = remoteQP;
     attr.rq_psn = 0;
     attr.max_dest_rd_atomic = 0;
-    attr.min_rnr_timer = 4; // 0.04 millisecond
+    attr.min_rnr_timer = 1; // 0.01 millisecond
     if (int err = ibv_modify_qp(QP, &attr, IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU |
                                 IBV_QP_RQ_PSN | IBV_QP_MAX_DEST_RD_ATOMIC |
                                 IBV_QP_MIN_RNR_TIMER | IBV_QP_DEST_QPN)) {
@@ -189,7 +191,10 @@ void RDMAConnection::completeHandshake(uint32_t remoteQP) {
     K2DEBUG("Handshake complete");
     stack->RCConnectionCount++;
     isReady = true;
+
+    size_t beforeSize = sendQueue.size();
     processSends<std::deque<temporary_buffer<uint8_t>>>(sendQueue);
+    stack->sendQueueSize -= beforeSize - sendQueue.size();
 }
 
 
@@ -270,6 +275,10 @@ void RDMAConnection::processSends(VecType& queue) {
         outstandingBuffers[idx] = std::move(sendData);
     }
 
+    stack->totalSend += toProcess;
+    stack->sendBatchSum += toProcess;
+    stack->sendBatchCount++;
+
     struct ibv_send_wr* badSR;
     if (int err = ibv_post_send(QP, firstSR, &badSR)) {
         K2ASSERT(false, "Failed to post send on RC QP: " << strerror(err));
@@ -320,6 +329,8 @@ void RDMAConnection::incomingMessage(unsigned char* data, uint32_t size) {
 
 void RDMAConnection::send(std::vector<temporary_buffer<uint8_t>>&& buf) {
     if (!isReady || sendQueue.size()) {
+        size_t beforeSize = sendQueue.size();
+
         auto it = buf.begin();
         for (; it != buf.end(); ++it) {
             if (it->size() > messagePackThreshold) {
@@ -345,11 +356,13 @@ void RDMAConnection::send(std::vector<temporary_buffer<uint8_t>>&& buf) {
             sendQueueTailBytesLeft = 0;
         }
 
+        stack->sendQueueSize += sendQueue.size() - beforeSize;
         return;
     }
 
     processSends<std::vector<temporary_buffer<uint8_t>>>(buf);
     if (buf.size()) {
+        stack->sendQueueSize += buf.size();
         sendQueue.insert(sendQueue.end(), std::make_move_iterator(buf.begin()),
                          std::make_move_iterator(buf.end()));
     }
@@ -712,7 +725,11 @@ bool RDMAStack::processRCCQ() {
                 K2WARN("error on send wc");
                 connIt->second->shutdownConnection();
             }
+
+            size_t beforeSize = connIt->second->sendQueue.size();
             connIt->second->processSends(connIt->second->sendQueue);
+            size_t afterSize = connIt->second->sendQueue.size();
+            sendQueueSize -= beforeSize - afterSize;
         } else {
             int idx = WCs[i].wr_id;
             if (recvWCs == 0) {
@@ -746,6 +763,10 @@ bool RDMAStack::processRCCQ() {
     }
 
     if (recvWCs) {
+        totalRecv += recvWCs;
+        recvBatchSum += recvWCs;
+        ++recvBatchCount;
+
         struct ibv_recv_wr* badRR;
         if (int err = ibv_post_srq_recv(SRQ, &(RCQPRRs.RecvRequests[firstRecvIdx]), &badRR)) {
             K2ASSERT(false, "error on RC post_recv: " << strerror(err));
@@ -793,6 +814,9 @@ bool RDMAStack::poller() {
         return false;
     }
 
+    sendQueueSum += sendQueueSize;
+    ++sendQueueCount;
+
     bool didWork = processUDCQ();
 
     didWork |= processUDSendQueue();
@@ -803,6 +827,44 @@ bool RDMAStack::poller() {
 
 void RDMAStack::registerPoller() {
     RDMAPoller = reactor::poller::simple([&] { return poller(); });
+}
+
+void RDMAStack::registerMetrics() {
+    namespace sm = seastar::metrics;
+
+    metricGroup.add_group("rdma_stack", {
+        sm::make_counter("send_count", totalSend, 
+            sm::description("Total number of messages sent")),
+        sm::make_counter("recv_count", totalRecv, 
+            sm::description("Total number of messages received")),
+        sm::make_gauge("send_queue_size", [this]{ 
+                if (!sendQueueCount) {
+                    return 0.0;
+                }
+                double avg = sendQueueSum / (double)sendQueueCount;
+                sendQueueSum = sendQueueCount = 0;
+                return avg;
+            }, 
+            sm::description("Average size of the send queue")),
+        sm::make_gauge("send_batch_size", [this]{ 
+                if (!sendBatchCount) {
+                    return 0.0;
+                }
+                double avg = sendBatchSum / (double)sendBatchCount;
+                sendBatchSum = sendBatchCount = 0;
+                return avg;
+            }, 
+            sm::description("Average size of the send batches")),
+        sm::make_gauge("recv_batch_size", [this]{ 
+                if (!recvBatchCount) {
+                    return 0.0;
+                }
+                double avg = recvBatchSum / (double)recvBatchCount;
+                recvBatchSum = recvBatchCount = 0;
+                return avg;
+            },
+            sm::description("Average size of receive batches"))
+    });
 }
 
 std::unique_ptr<RDMAStack> RDMAStack::makeUDQP(std::unique_ptr<RDMAStack> stack) {
@@ -974,6 +1036,7 @@ std::unique_ptr<RDMAStack> RDMAStack::makeRDMAStack(void* memRegion, size_t memR
     }
 
     stack->registerPoller();
+    stack->registerMetrics();
 
     return stack;
 }

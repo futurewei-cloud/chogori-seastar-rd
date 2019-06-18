@@ -3865,9 +3865,14 @@ public:
 
 class reactor::epoll_pollfn final : public reactor::pollfn {
     reactor& _r;
+    uint32_t count=0;
 public:
     epoll_pollfn(reactor& r) : _r(r) {}
     virtual bool poll() final override {
+        ++count;
+        if (count % 1000 != 0) {
+            return false;
+        }
         return _r.wait_and_process();
     }
     virtual bool pure_poll() override final {

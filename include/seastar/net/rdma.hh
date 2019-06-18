@@ -236,6 +236,7 @@ private:
     int RCConnectionCount = 0;
 
     void registerPoller();
+    void registerMetrics();
 
     bool acceptPromiseActive = false;
     promise<std::unique_ptr<RDMAConnection>> acceptPromise;
@@ -243,6 +244,18 @@ private:
 
     //TODO move to slow core
     struct ibv_ah* makeAH(const union ibv_gid& GID);
+
+    // For metrics
+    uint64_t totalRecv=0;
+    uint64_t totalSend=0;
+    uint64_t sendQueueSize=0;
+    uint64_t sendQueueSum=0;
+    uint64_t sendQueueCount=0;
+    uint64_t sendBatchSum=0;
+    uint64_t sendBatchCount=0;
+    uint64_t recvBatchSum=0;
+    uint64_t recvBatchCount=0;
+    seastar::metrics::metric_groups metricGroup;
 
     friend class RDMAConnection;
 };
