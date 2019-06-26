@@ -164,7 +164,7 @@ void RDMAConnection::completeHandshake(uint32_t remoteQP) {
     attr.sq_psn = 0;
     attr.timeout = 8; // ~1ms
     attr.retry_cnt = 5;
-    attr.rnr_retry = 5;
+    attr.rnr_retry = 7;
     attr.max_rd_atomic = 0;
     if (int err = ibv_modify_qp(QP, &attr, IBV_QP_STATE | IBV_QP_SQ_PSN |
                                 IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT |
@@ -230,6 +230,13 @@ void RDMAConnection::sendCloseSignal() {
 
 template <class VecType>
 void RDMAConnection::processSends(VecType& queue) {
+    if (!QP) {
+        // This case means an error occured and we shutdown the connection
+        queue.clear();
+        sendQueue.clear();
+        sendWRs.postedCount = 0;
+    }
+
     if (closePromiseActive && sendQueue.size() == 0 && sendWRs.postedCount == 0
                                                     && queue.size() == 0) {
         shutdownConnection();
@@ -312,7 +319,7 @@ future<temporary_buffer<uint8_t>> RDMAConnection::recv() {
 }
 
 void RDMAConnection::incomingMessage(unsigned char* data, uint32_t size) {
-    K2DEBUG("RDMAConnection got message of size: " << size);
+    K2DEBUG("RDMAConn " << QP->qp_num << " got message of size: " << size);
     temporary_buffer<uint8_t> buf(data, size, make_free_deleter(data));
     if (recvPromiseActive) {
         recvPromiseActive = false;
@@ -380,8 +387,16 @@ void RDMAConnection::shutdownConnection() {
         K2WARN("Shutting down RC QP with pending sends");
     }
 
-    // TODO slow core? reset QP to init state?
+    // TODO slow core
     if (QP) {
+        // Transitioning the QP into the Error state will flush
+        // any outstanding WRs, possibly with errors. Is needed to 
+        // maintain consistency in the SRQ
+        struct ibv_qp_attr attr;
+        memset(&attr, 0, sizeof(ibv_qp_attr));
+        attr.qp_state = IBV_QPS_ERR;
+        ibv_modify_qp(QP, &attr, IBV_QP_STATE);
+
         ibv_destroy_qp(QP);
         QP = nullptr;
     }
@@ -620,6 +635,7 @@ bool RDMAStack::processUDSendQueue() {
 
 void RDMAStack::processCompletedSRs(std::array<temporary_buffer<uint8_t>, SendWRData::maxWR>& buffers, SendWRData& WRData, uint64_t signaledID) {
     uint32_t freed=0;
+    K2ASSERT(WRData.postedIdx <= signaledID, "Send assumptions bad");
     for (int i=WRData.postedIdx; i<=(int)signaledID; ++i, ++freed) {
         buffers[i] = temporary_buffer<uint8_t>();
     }
@@ -692,7 +708,8 @@ bool RDMAStack::processRCCQ() {
     }
 
     int recvWCs = 0;
-    int firstRecvIdx = 0;
+    struct ibv_recv_wr* prevRR = nullptr;
+    struct ibv_recv_wr* firstRR = nullptr;
 
     for (int i=0; i<completed; ++i) {
         bool foundConn = true;
@@ -715,14 +732,14 @@ bool RDMAStack::processRCCQ() {
 
         if (!isRecv) {
             // We can ignore send completions for connections that no longer exist
-            if (!foundConn) {
+            if (!foundConn || !connIt->second->QP) {
                 continue;
             }
 
             processCompletedSRs(connIt->second->outstandingBuffers, 
                                 connIt->second->sendWRs, WCs[i].wr_id - RecvWRData::maxWR);
             if (WCs[i].status != IBV_WC_SUCCESS) {
-                K2WARN("error on send wc");
+                K2WARN("error on send wc: " << ibv_wc_status_str(WCs[i].status));
                 connIt->second->shutdownConnection();
             }
 
@@ -732,34 +749,32 @@ bool RDMAStack::processRCCQ() {
             sendQueueSize -= beforeSize - afterSize;
         } else {
             int idx = WCs[i].wr_id;
-            if (recvWCs == 0) {
-                firstRecvIdx = idx;
-            }
+            struct ibv_recv_wr& RR = RCQPRRs.RecvRequests[idx];
             ++recvWCs;
 
             if (WCs[i].status != IBV_WC_SUCCESS) {
-                K2WARN("error on recv wc");
+                K2WARN("error on recv wc: " << ibv_wc_status_str(WCs[i].status));
                 if (foundConn) {
                     connIt->second->shutdownConnection();
                 }
+                free((unsigned char*)RCQPRRs.Segments[idx].addr);
             } else if (foundConn) {
                 unsigned char* data = (unsigned char*)RCQPRRs.Segments[idx].addr;
                 uint32_t size = WCs[i].byte_len;
                 connIt->second->incomingMessage(data, size);
             }
-        }
-    }
 
-    for (int i=0; i<recvWCs; ++i) {
-        int idx = (firstRecvIdx + i) % RecvWRData::maxWR;
-        struct ibv_recv_wr& RR = RCQPRRs.RecvRequests[idx];
-
-        if (i == recvWCs-1) {
-            RR.next = nullptr;
-        } else {
-            RR.next = &(RCQPRRs.RecvRequests[(idx+1)%RecvWRData::maxWR]);
+            // Prepare RR to be posted again. We cannot assume RRs are completed in order
+            if (!firstRR) {
+                firstRR = &RR;
+            }
+            if (prevRR) {
+                prevRR->next = &RR;
+            }
+            prevRR = &RR;
+            RCQPRRs.Segments[idx].addr = (uint64_t)malloc(RCDataSize);
+            K2ASSERT(RCQPRRs.Segments[idx].addr, "Failed to allocate memory for RR");
         }
-        RCQPRRs.Segments[idx].addr = (uint64_t)malloc(RCDataSize);
     }
 
     if (recvWCs) {
@@ -767,8 +782,9 @@ bool RDMAStack::processRCCQ() {
         recvBatchSum += recvWCs;
         ++recvBatchCount;
 
+        prevRR->next = nullptr;
         struct ibv_recv_wr* badRR;
-        if (int err = ibv_post_srq_recv(SRQ, &(RCQPRRs.RecvRequests[firstRecvIdx]), &badRR)) {
+        if (int err = ibv_post_srq_recv(SRQ, firstRR, &badRR)) {
             K2ASSERT(false, "error on RC post_recv: " << strerror(err));
         }
     }
@@ -919,6 +935,7 @@ std::unique_ptr<RDMAStack> RDMAStack::makeUDQP(std::unique_ptr<RDMAStack> stack)
         }
         // This memory will be freed when the RDMAStack is destroyed
         SG.addr = (uint64_t)malloc(UDQPRxSize);
+        K2ASSERT(SG.addr, "Failed to allocate memory for RR");
         SG.length = UDQPRxSize;
         SG.lkey = stack->memRegionHandle->lkey;
         RR.sg_list = &SG;
@@ -1024,6 +1041,7 @@ std::unique_ptr<RDMAStack> RDMAStack::makeRDMAStack(void* memRegion, size_t memR
         // will be wrapped in a temporary_buffer and passed to the user
         // so it will be freed when the user drops the temporary_buffer
         SG.addr = (uint64_t)malloc(RCDataSize);
+        K2ASSERT(SG.addr, "Failed to allocate memory for RR");
         SG.length = RCDataSize;
         SG.lkey = stack->memRegionHandle->lkey;
         RR.sg_list = &SG;
