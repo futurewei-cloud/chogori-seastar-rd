@@ -148,13 +148,12 @@ inline void jmp_buf_link::final_switch_out()
 
 #endif
 
-thread_context::thread_context(thread_attributes attr, std::function<void ()> func)
-        : _attr(std::move(attr))
+thread_context::thread_context(thread_attributes attr, noncopyable_function<void ()> func)
+        : task(attr.sched_group.value_or(current_scheduling_group()))
 #ifdef SEASTAR_THREAD_STACK_GUARDS
         , _stack_size(base_stack_size + getpagesize())
 #endif
-        , _func(std::move(func))
-        , _scheduling_group(_attr.sched_group.value_or(current_scheduling_group())) {
+        , _func(std::move(func)) {
     setup();
     _all_threads.push_front(*this);
 }
@@ -219,71 +218,35 @@ thread_context::setup() {
 
 void
 thread_context::switch_in() {
-    if (_attr.scheduling_group) {
-        _attr.scheduling_group->account_start();
-        _context.yield_at = _attr.scheduling_group->_this_run_start + _attr.scheduling_group->_this_period_remain;
-    } else {
-        _context.yield_at = {};
-    }
     _context.switch_in();
 }
 
 void
 thread_context::switch_out() {
-    if (_attr.scheduling_group) {
-        _attr.scheduling_group->account_stop();
-    }
     _context.switch_out();
 }
 
 bool
 thread_context::should_yield() const {
-    if (!_attr.scheduling_group) {
-        return need_preempt();
-    }
-    return need_preempt() || bool(_attr.scheduling_group->next_scheduling_point());
+    return need_preempt();
 }
 
-thread_local thread_context::preempted_thread_list thread_context::_preempted_threads;
 thread_local thread_context::all_thread_list thread_context::_all_threads;
 
 void
-thread_context::yield() {
-    if (!_attr.scheduling_group) {
-        schedule(make_task(_scheduling_group, [this] {
-            switch_in();
-        }));
-        switch_out();
-    } else {
-        auto when = _attr.scheduling_group->next_scheduling_point();
-        if (when) {
-            _preempted_threads.push_back(*this);
-            _sched_promise.emplace();
-            auto fut = _sched_promise->get_future();
-            _sched_timer.arm(*when);
-            fut.get();
-            _sched_promise = compat::nullopt;
-        } else if (need_preempt()) {
-            later().get();
-        }
-    }
+thread_context::run_and_dispose() noexcept {
+    switch_in();
 }
 
-bool thread::try_run_one_yielded_thread() {
-    if (thread_context::_preempted_threads.empty()) {
-        return false;
-    }
-    auto&& t = thread_context::_preempted_threads.front();
-    t._sched_timer.cancel();
-    t._sched_promise->set_value();
-    thread_context::_preempted_threads.pop_front();
-    return true;
+void
+thread_context::yield() {
+    schedule(std::unique_ptr<task>(this));
+    switch_out();
 }
 
 void
 thread_context::reschedule() {
-    _preempted_threads.erase(_preempted_threads.iterator_to(*this));
-    _sched_promise->set_value();
+    schedule(std::unique_ptr<task>(this));
 }
 
 void
@@ -307,10 +270,7 @@ thread_context::main() {
     #warning "Backtracing from seastar threads may be broken"
 #endif
     _context.initial_switch_in_completed();
-    if (_attr.scheduling_group) {
-        _attr.scheduling_group->account_start();
-    }
-    if (_scheduling_group != current_scheduling_group()) {
+    if (group() != current_scheduling_group()) {
         yield();
     }
     try {
@@ -318,9 +278,6 @@ thread_context::main() {
         _done.set_value();
     } catch (...) {
         _done.set_exception(std::current_exception());
-    }
-    if (_attr.scheduling_group) {
-        _attr.scheduling_group->account_stop();
     }
 
     _context.final_switch_out();
@@ -348,7 +305,7 @@ void init() {
 
 scheduling_group
 sched_group(const thread_context* thread) {
-    return thread->_scheduling_group;
+    return thread->group();
 }
 
 }
@@ -361,34 +318,11 @@ bool thread::should_yield() {
     return thread_impl::get()->should_yield();
 }
 
-thread_scheduling_group::thread_scheduling_group(std::chrono::nanoseconds period, float usage)
-        : _period(period), _quota(std::chrono::duration_cast<std::chrono::nanoseconds>(usage * period)) {
-}
-
-void
-thread_scheduling_group::account_start() {
-    auto now = thread_clock::now();
-    if (now >= _this_period_ends) {
-        _this_period_ends = now + _period;
-        _this_period_remain = _quota;
+void thread::maybe_yield() {
+    auto tctx = thread_impl::get();
+    if (tctx->should_yield()) {
+        tctx->yield();
     }
-    _this_run_start = now;
-}
-
-void
-thread_scheduling_group::account_stop() {
-    _this_period_remain -= thread_clock::now() - _this_run_start;
-}
-
-compat::optional<thread_clock::time_point>
-thread_scheduling_group::next_scheduling_point() const {
-    auto now = thread_clock::now();
-    auto current_remain = _this_period_remain - (now - _this_run_start);
-    if (current_remain > std::chrono::nanoseconds(0)) {
-        return compat::nullopt;
-    }
-    return _this_period_ends - current_remain;
-
 }
 
 }

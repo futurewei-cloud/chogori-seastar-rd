@@ -317,11 +317,11 @@ namespace rpc {
       });
   }
 
-  template<typename FrameType, typename Info>
+  template<typename FrameType>
   typename FrameType::return_type
-  connection::read_frame(const Info& info, input_stream<char>& in) {
+  connection::read_frame(socket_address info, input_stream<char>& in) {
       auto header_size = FrameType::header_size();
-      return in.read_exactly(header_size).then([this, header_size, &info, &in] (temporary_buffer<char> header) {
+      return in.read_exactly(header_size).then([this, header_size, info, &in] (temporary_buffer<char> header) {
           if (header.size() != header_size) {
               if (header.size() != 0) {
                   _logger(info, format("unexpected eof on a {} while reading header: expected {:d} got {:d}", FrameType::role(), header_size, header.size()));
@@ -333,7 +333,7 @@ namespace rpc {
           if (!size) {
               return FrameType::make_value(h, rcv_buf());
           } else {
-              return read_rcv_buf(in, size).then([this, &info, h = std::move(h), size] (rcv_buf rb) {
+              return read_rcv_buf(in, size).then([this, info, h = std::move(h), size] (rcv_buf rb) {
                   if (rb.size != size) {
                       _logger(info, format("unexpected eof on a {} while reading data: expected {:d} got {:d}", FrameType::role(), size, rb.size));
                       return FrameType::empty_value();
@@ -345,9 +345,9 @@ namespace rpc {
       });
   }
 
-  template<typename FrameType, typename Info>
+  template<typename FrameType>
   typename FrameType::return_type
-  connection::read_frame_compressed(const Info& info, std::unique_ptr<compressor>& compressor, input_stream<char>& in) {
+  connection::read_frame_compressed(socket_address info, std::unique_ptr<compressor>& compressor, input_stream<char>& in) {
       if (compressor) {
           return in.read_exactly(4).then([&] (temporary_buffer<char> compress_header) {
               if (compress_header.size() != 4) {
@@ -358,7 +358,7 @@ namespace rpc {
               }
               auto ptr = compress_header.get();
               auto size = read_le<uint32_t>(ptr);
-              return read_rcv_buf(in, size).then([this, size, &compressor, &info] (rcv_buf compressed_data) {
+              return read_rcv_buf(in, size).then([this, size, &compressor, info] (rcv_buf compressed_data) {
                   if (compressed_data.size != size) {
                       _logger(info, format("unexpected eof on a {} while reading compressed data: expected {:d} got {:d}", FrameType::role(), size, compressed_data.size));
                       return FrameType::empty_value();
@@ -373,7 +373,7 @@ namespace rpc {
                           p = net::packet(std::move(p), std::move(b));
                       }
                   }
-                  return do_with(as_input_stream(std::move(p)), [this, &info] (input_stream<char>& in) {
+                  return do_with(as_input_stream(std::move(p)), [this, info] (input_stream<char>& in) {
                       return read_frame<FrameType>(info, in);
                   });
               });
@@ -456,10 +456,6 @@ namespace rpc {
   }
 
   future<> connection::stream_receive(circular_buffer<foreign_ptr<std::unique_ptr<rcv_buf>>>& bufs) {
-      if (_source_closed) {
-          return make_exception_future<>(stream_closed());
-      }
-
       return _stream_queue.not_empty().then([this, &bufs] {
           bool eof = !_stream_queue.consume([&bufs] (rcv_buf&& b) {
               if (b.size == -1U) { // max fragment length marks an end of a stream
@@ -646,9 +642,9 @@ namespace rpc {
               features[protocol_features::ISOLATION] = _options.isolation_cookie;
           }
 
-          send_negotiation_frame(std::move(features));
-
-          return negotiate_protocol(_read_buf).then([this] () {
+          return send_negotiation_frame(std::move(features)).then([this] {
+               return negotiate_protocol(_read_buf);
+          }).then([this] () {
               _client_negotiated->set_value();
               _client_negotiated = compat::nullopt;
               send_loop();
@@ -838,9 +834,9 @@ namespace rpc {
   future<compat::optional<uint64_t>, uint64_t, int64_t, compat::optional<rcv_buf>>
   server::connection::read_request_frame_compressed(input_stream<char>& in) {
       if (_timeout_negotiated) {
-          return read_frame_compressed<request_frame_with_timeout>(_info, _compressor, in);
+          return read_frame_compressed<request_frame_with_timeout>(_info.addr, _compressor, in);
       } else {
-          return read_frame_compressed<request_frame>(_info, _compressor, in);
+          return read_frame_compressed<request_frame>(_info.addr, _compressor, in);
       }
   }
 
@@ -852,6 +848,25 @@ namespace rpc {
       write_le<uint32_t>(p + 8, data.size - 12);
       return send(std::move(data), timeout);
   }
+
+future<> server::connection::send_unknown_verb_reply(compat::optional<rpc_clock_type::time_point> timeout, int64_t msg_id, uint64_t type) {
+    return wait_for_resources(28, timeout).then([this, timeout, msg_id, type] (auto permit) {
+        // send unknown_verb exception back
+        snd_buf data(28);
+        static_assert(snd_buf::chunk_size >= 28, "send buffer chunk size is too small");
+        auto p = data.front().get_write() + 12;
+        write_le<uint32_t>(p, uint32_t(exception_type::UNKNOWN_VERB));
+        write_le<uint32_t>(p + 4, uint32_t(8));
+        write_le<uint64_t>(p + 8, type);
+        try {
+            with_gate(_server._reply_gate, [this, timeout, msg_id, data = std::move(data), permit = std::move(permit)] () mutable {
+                // workaround for https://gcc.gnu.org/bugzilla/show_bug.cgi?id=83268
+                auto c = shared_from_this();
+                return respond(-msg_id, std::move(data), timeout).then([c = std::move(c), permit = std::move(permit)] {});
+            });
+        } catch(gate_closed_exception&) {/* ignore */}
+    });
+}
 
   future<> server::connection::process() {
       return negotiate_protocol(_read_buf).then([this] () mutable {
@@ -872,29 +887,21 @@ namespace rpc {
                           timeout = rpc_clock_type::now() + std::chrono::milliseconds(*expire);
                       }
                       auto h = _server._proto->get_handler(type);
-                      if (h) {
-                          // If the new method of per-connection scheduling group was used, honor it.
-                          // Otherwise, use the old per-handler scheduling group.
-                          auto sg = _isolation_config ? _isolation_config->sched_group : h->sg;
-                          return with_scheduling_group(sg, std::ref(h->func), shared_from_this(), timeout, msg_id, std::move(data.value()));
-                      } else {
-                          return wait_for_resources(28, timeout).then([this, timeout, msg_id, type] (auto permit) {
-                              // send unknown_verb exception back
-                              snd_buf data(28);
-                              static_assert(snd_buf::chunk_size >= 28, "send buffer chunk size is too small");
-                              auto p = data.front().get_write() + 12;
-                              write_le<uint32_t>(p, uint32_t(exception_type::UNKNOWN_VERB));
-                              write_le<uint32_t>(p + 4, uint32_t(8));
-                              write_le<uint64_t>(p + 8, type);
-                              try {
-                                  with_gate(_server._reply_gate, [this, timeout, msg_id, data = std::move(data), permit = std::move(permit)] () mutable {
-                                      // workaround for https://gcc.gnu.org/bugzilla/show_bug.cgi?id=83268
-                                      auto c = shared_from_this();
-                                      return respond(-msg_id, std::move(data), timeout).then([c = std::move(c), permit = std::move(permit)] {});
-                                  });
-                              } catch(gate_closed_exception&) {/* ignore */}
-                          });
-                      }
+                      // If the new method of per-connection scheduling group was used, honor it.
+                      // Otherwise, use the old per-handler scheduling group.
+                      auto sg = _isolation_config ? _isolation_config->sched_group : h.first ? h.first->sg : scheduling_group();
+                      return with_scheduling_group(sg, [this, timeout, type, msg_id, h, data = std::move(data.value())] () mutable {
+                          // with_scheduling_group may defer and the callback might be unregistered already when the code runs
+                          // verify it by checking that handlers table version did not change, otherwise search for the handler again
+                          if (h.first && h.second != _server._proto->get_handlers_table_version()) {
+                              h = _server._proto->get_handler(type);
+                          }
+                          if (h.first) {
+                              return h.first->func(shared_from_this(), timeout, msg_id, std::move(data));
+                          } else {
+                              return send_unknown_verb_reply(timeout, msg_id, type);
+                          }
+                      });
                   }
               });
           });
@@ -970,12 +977,12 @@ namespace rpc {
       keep_doing([this] () mutable {
           return _ss.accept().then([this] (connected_socket fd, socket_address addr) mutable {
               fd.set_nodelay(_options.tcp_nodelay);
-              connection_id id = invalid_connection_id;
-              if (_options.streaming_domain) {
-                  id = {_next_client_id++ << 16 | uint16_t(engine().cpu_id())};
-              }
+              connection_id id = _options.streaming_domain ?
+                      connection_id::make_id(_next_client_id++, uint16_t(engine().cpu_id())) :
+                      connection_id::make_invalid_id(_next_client_id++);
               auto conn = _proto->make_server_connection(*this, std::move(fd), std::move(addr), id);
-              _conns.emplace(id, conn);
+              auto r = _conns.emplace(id, conn);
+              assert(r.second);
               conn->process();
           });
       }).then_wrapped([this] (future<>&& f){

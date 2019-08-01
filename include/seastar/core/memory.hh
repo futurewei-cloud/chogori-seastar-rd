@@ -114,18 +114,27 @@ enum class reclaimer_scope {
 
 class reclaimer {
 public:
+    struct request {
+        // The number of bytes which is needed to be released.
+        // The reclaimer can release a different amount.
+        // If less is released then the reclaimer may be invoked again.
+        size_t bytes_to_reclaim;
+    };
     using reclaim_fn = std::function<reclaiming_result ()>;
 private:
-    reclaim_fn _reclaim;
+    std::function<reclaiming_result (request)> _reclaim;
     reclaimer_scope _scope;
 public:
     // Installs new reclaimer which will be invoked when system is falling
     // low on memory. 'scope' determines when reclaimer can be executed.
-    reclaimer(reclaim_fn reclaim, reclaimer_scope scope = reclaimer_scope::async);
+    reclaimer(std::function<reclaiming_result ()> reclaim, reclaimer_scope scope = reclaimer_scope::async);
+    reclaimer(std::function<reclaiming_result (request)> reclaim, reclaimer_scope scope = reclaimer_scope::async);
     ~reclaimer();
-    reclaiming_result do_reclaim() { return _reclaim(); }
+    reclaiming_result do_reclaim(size_t bytes_to_reclaim) { return _reclaim(request{bytes_to_reclaim}); }
     reclaimer_scope scope() const { return _scope; }
 };
+
+extern compat::polymorphic_allocator<char>* malloc_allocator;
 
 // Call periodically to recycle objects that were freed
 // on cpu other than the one they were allocated on.
@@ -142,22 +151,6 @@ bool drain_cross_cpu_freelist();
 // in a safe place wrt. allocations.
 void set_reclaim_hook(
         std::function<void (std::function<void ()>)> hook);
-
-using physical_address = uint64_t;
-
-struct translation {
-    translation() = default;
-    translation(physical_address a, size_t s) : addr(a), size(s) {}
-    physical_address addr = 0;
-    size_t size = 0;
-};
-
-// Translate a virtual address range to a physical range.
-//
-// Can return a smaller range (in which case the reminder needs
-// to be translated again), or a zero sized range in case the
-// translation is not known.
-translation translate(const void* addr, size_t size);
 
 /// \endcond
 

@@ -37,7 +37,7 @@ inline future<temporary_buffer<char>> data_source_impl::skip(uint64_t n)
             return get().then([&] (temporary_buffer<char> buffer) -> compat::optional<temporary_buffer<char>> {
                 if (buffer.size() >= n) {
                     buffer.trim_front(n);
-                    return std::move(buffer);
+                    return SEASTAR_COPY_ELISION(buffer);
                 }
                 n -= buffer.size();
                 return { };
@@ -457,7 +457,8 @@ output_stream<CharType>::poll_flush() {
         f = _fd.put(std::move(_zc_bufs));
     }
 
-    f.then([this] {
+    // FIXME: future is discarded
+    (void)f.then([this] {
         return _fd.flush();
     }).then_wrapped([this] (future<> f) {
         try {

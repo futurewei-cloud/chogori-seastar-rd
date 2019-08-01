@@ -572,7 +572,7 @@ auto recv_helper(signature<Ret (InArgs...)> sig, Func&& func, WantClientInfo wci
             f = f.handle_exception_type([] (semaphore_timed_out&) { /* ignore */ });
         }
 
-        return std::move(f);
+        return f;
     };
 }
 
@@ -645,7 +645,18 @@ auto protocol<Serializer, MsgType>::register_handler(MsgType t, scheduling_group
 template<typename Serializer, typename MsgType>
 template<typename Func>
 auto protocol<Serializer, MsgType>::register_handler(MsgType t, Func&& func) {
+    _handlers_version++;
     return register_handler(t, scheduling_group(), std::forward<Func>(func));
+}
+
+template<typename Serializer, typename MsgType>
+std::pair<rpc_handler*, uint32_t> protocol<Serializer, MsgType>::get_handler(uint64_t msg_id) {
+    rpc_handler* h = nullptr;
+    auto it = _handlers.find(MsgType(msg_id));
+    if (it != _handlers.end()) {
+        h = &it->second;
+    }
+    return std::make_pair(h, _handlers_version);
 }
 
 template<typename T> T make_shard_local_buffer_copy(foreign_ptr<std::unique_ptr<T>> org);
@@ -682,6 +693,17 @@ future<> sink_impl<Serializer, Out...>::operator()(const Out&... args) {
             }
         });
         return make_ready_future<>();
+    });
+}
+
+template<typename Serializer, typename... Out>
+future<> sink_impl<Serializer, Out...>::flush() {
+    // wait until everything is sent out before returning.
+    return with_semaphore(this->_sem, max_stream_buffers_memory, [this] {
+        if (this->_ex) {
+            return make_exception_future(this->_ex);
+        }
+        return make_ready_future();
     });
 }
 
@@ -726,6 +748,9 @@ future<compat::optional<std::tuple<In...>>> source_impl<Serializer, In...>::oper
     // refill buffers from remote cpu
     return smp::submit_to(this->_con->get_owner_shard(), [this] () -> future<> {
         connection* con = this->_con->get();
+        if (con->_source_closed) {
+            return make_exception_future<>(stream_closed());
+        }
         return con->stream_receive(this->_bufs).then_wrapped([this, con] (future<>&& f) {
             if (f.failed()) {
                 return con->close_source().then_wrapped([ex = f.get_exception()] (future<> f){

@@ -115,7 +115,7 @@ struct evaluation_directory {
             if (fs::exists(sys_file / "slaves")) {
                 for (auto& dev : fs::directory_iterator(sys_file / "slaves")) {
                     is_leaf = false;
-                    scan_device(read_first_line(dev / "dev"));
+                    scan_device(read_first_line(dev.path() / "dev"));
                 }
             }
 
@@ -551,7 +551,7 @@ fs::path mountpoint_of(sstring filename) {
         mnt_candidate = current;
         candidate_id = st.st_dev;
         current = current.parent_path();
-    } while (!current.empty());
+    } while (mnt_candidate != current);
 
     return mnt_candidate;
 }

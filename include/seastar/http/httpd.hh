@@ -242,12 +242,15 @@ public:
     explicit http_server(const sstring& name) : _stats(*this, name) {
         _date_format_timer.arm_periodic(1s);
     }
-    future<> listen(ipv4_addr addr) {
-        listen_options lo;
-        lo.reuse_address = true;
-        _listeners.push_back(engine().listen(make_ipv4_address(addr), lo));
+    future<> listen(socket_address addr, listen_options lo) {
+        _listeners.push_back(engine().listen(addr, lo));
         _stopped = when_all(std::move(_stopped), do_accepts(_listeners.size() - 1)).discard_result();
         return make_ready_future<>();
+    }
+    future<> listen(socket_address addr) {
+        listen_options lo;
+        lo.reuse_address = true;
+        return listen(addr, lo);
     }
     future<> stop() {
         _stopping = true;
@@ -273,7 +276,8 @@ public:
             }
             auto cs_sa = f_cs_sa.get();
             auto conn = new connection(*this, std::get<0>(std::move(cs_sa)), std::get<1>(std::move(cs_sa)));
-            conn->process().then_wrapped([conn] (auto&& f) {
+            // FIXME: future is discarded
+            (void)conn->process().then_wrapped([conn] (auto&& f) {
                 delete conn;
                 try {
                     f.get();
@@ -281,7 +285,8 @@ public:
                     std::cerr << "request error " << ex.what() << std::endl;
                 }
             });
-            do_accepts(which);
+            // FIXME: future is discarded
+            (void)do_accepts(which);
         }).then_wrapped([] (auto f) {
             try {
                 f.get();
@@ -363,8 +368,12 @@ public:
         });
     }
 
-    future<> listen(ipv4_addr addr) {
+    future<> listen(socket_address addr) {
         return _server_dist->invoke_on_all(&http_server::listen, addr);
+    }
+
+    future<> listen(socket_address addr, listen_options lo) {
+        return _server_dist->invoke_on_all(&http_server::listen, addr, lo);
     }
 
     distributed<http_server>& server() {

@@ -65,6 +65,14 @@ seastar::net::inet_address::inet_address(const ipv4_address& in)
     : inet_address(::in_addr{hton(in.ip)})
 {}
 
+seastar::net::inet_address::inet_address(const ipv6_address& in)
+    : inet_address([&] {
+        ::in6_addr tmp;
+        std::copy(in.bytes().begin(), in.bytes().end(), tmp.s6_addr);
+        return tmp;
+    }())
+{}
+
 seastar::net::ipv4_address seastar::net::inet_address::as_ipv4_address() const {
     in_addr in = *this;
     return ipv4_address(ntoh(in.s_addr));
@@ -255,6 +263,16 @@ seastar::net::inet_address seastar::socket_address::addr() const {
     return net::ntoh(u.in.sin_port);
 }
 
+bool seastar::socket_address::is_wildcard() const {
+    if (u.sa.sa_family == AF_INET) {
+        ipv4_addr addr(*this);
+        return addr.is_ip_unspecified() && addr.is_port_unspecified();
+    } else {
+        ipv6_addr addr(*this);
+        return addr.is_ip_unspecified() && addr.is_port_unspecified();
+    }
+}
+
 std::ostream& seastar::net::operator<<(std::ostream& os, const inet_address& addr) {
     char buffer[64];
     return os << inet_ntop(int(addr.in_family()), addr.data(), buffer, sizeof(buffer));
@@ -317,4 +335,10 @@ size_t std::hash<seastar::socket_address>::operator()(const seastar::socket_addr
 
 size_t std::hash<seastar::net::ipv6_address>::operator()(const seastar::net::ipv6_address& a) const {
     return boost::hash_range(a.ip.begin(), a.ip.end());
+}
+
+size_t std::hash<seastar::ipv4_addr>::operator()(const seastar::ipv4_addr& x) const {
+    size_t h = x.ip;
+    boost::hash_combine(h, x.port);
+    return h;
 }

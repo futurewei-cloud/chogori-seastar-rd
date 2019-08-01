@@ -94,7 +94,7 @@ function (seastar_add_test name)
 
       list (APPEND libraries
         seastar_testing
-        seastar_with_flags)
+        seastar_private)
 
       if (NOT (Seastar_JENKINS STREQUAL ""))
         list (APPEND args ${jenkins_args})
@@ -107,7 +107,7 @@ function (seastar_add_test name)
 
       list (APPEND libraries
         Boost::unit_test_framework
-        seastar_with_flags)
+        seastar_private)
 
       if (NOT (Seastar_JENKINS STREQUAL ""))
         list (APPEND args ${jenkins_args})
@@ -134,7 +134,7 @@ function (seastar_add_test name)
 
     set_target_properties (${executable_target}
       PROPERTIES
-        OUTPUT_NAME ${name})
+        OUTPUT_NAME ${name}_test)
 
     add_dependencies (unit_tests ${executable_target})
     set (forwarded_args COMMAND ${executable_target} ${args})
@@ -179,7 +179,7 @@ endfunction ()
 #
 # These kinds of tests are structured like Seastar applications.
 #
-# These tests always link against `seastar_with_flags` and are always invoked with
+# These tests always link against `seastar_private` and are always invoked with
 # `-c ${Seastar_UNIT_TEST_SMP}`.
 #
 function (seastar_add_app_test name)
@@ -193,7 +193,7 @@ function (seastar_add_app_test name)
     KIND CUSTOM
     SOURCES ${parsed_args_SOURCES}
     LIBRARIES
-      seastar_with_flags
+      seastar_private
       ${parsed_args_LIBRARIES}
     RUN_ARGS
       -c ${Seastar_UNIT_TEST_SMP}
@@ -231,9 +231,7 @@ else ()
 endif ()
 
 seastar_add_test (allocator
-  KIND CUSTOM
   SOURCES allocator_test.cc
-  LIBRARIES seastar_with_flags
   RUN_ARGS ${allocator_test_args})
 
 seastar_add_app_test (alien
@@ -261,6 +259,9 @@ endif ()
 
 seastar_add_test (defer
   SOURCES defer_test.cc)
+
+seastar_add_test (deleter
+  SOURCES deleter_test.cc)
 
 seastar_add_app_test (directory
   SOURCES directory_test.cc)
@@ -294,6 +295,9 @@ seastar_add_test (fstream
 seastar_add_test (futures
   SOURCES futures_test.cc)
 
+seastar_add_test (sharded
+  SOURCES sharded_test.cc)
+
 seastar_add_test (httpd
   SOURCES
     httpd_test.cc
@@ -307,6 +311,9 @@ seastar_add_test (json_formatter
 
 seastar_add_test (lowres_clock
   SOURCES lowres_clock_test.cc)
+
+seastar_add_test (metrics
+  SOURCES metrics_test.cc)
 
 seastar_add_test (net_config
   KIND BOOST
@@ -357,6 +364,9 @@ seastar_add_test (simple_stream
 seastar_add_app_test (smp
   SOURCES smp_test.cc)
 
+seastar_add_app_test (socket
+  SOURCES socket_test.cc)
+
 seastar_add_test (sstring
   KIND BOOST
   SOURCES sstring_test.cc)
@@ -372,6 +382,10 @@ seastar_add_app_test (thread_context_switch
 
 seastar_add_app_test (timer
   SOURCES timer_test.cc)
+
+seastar_add_test (uname
+  KIND BOOST
+  SOURCES uname_test.cc)
 
 set (tls_certificate_files
   catest.key

@@ -42,11 +42,11 @@ macro (seastar_add_demo name)
   target_link_libraries (${target}
     PRIVATE
       Boost::program_options
-      seastar_with_flags)
+      seastar_private)
 
   set_target_properties (${target}
     PROPERTIES
-      OUTPUT_NAME ${name})
+      OUTPUT_NAME ${name}_demo)
 
   add_dependencies (demos ${target})
 endmacro ()

@@ -94,6 +94,25 @@ namespace seastar {
 
 using shard_id = unsigned;
 
+/// Configuration structure for reactor
+///
+/// This structure provides configuration items for the reactor. It is typically
+/// provided by \ref app_template, not the user.
+struct reactor_config {
+    std::chrono::duration<double> task_quota{0.5e-3}; ///< default time between polls
+    /// \brief Handle SIGINT/SIGTERM by calling reactor::stop()
+    ///
+    /// When true, Seastar will set up signal handlers for SIGINT/SIGTERM that call
+    /// reactor::stop(). The reactor will then execute callbacks installed by
+    /// reactor::at_exit().
+    ///
+    /// When false, Seastar will not set up signal handlers for SIGINT/SIGTERM
+    /// automatically. The default behavior (terminate the program) will be kept.
+    /// You can adjust the behavior of SIGINT/SIGTERM by installing signal handlers
+    /// via reactor::handle_signal().
+    bool auto_handle_sigint_sigterm = true;  ///< automatically terminate on SIGINT/SIGTERM
+};
+
 namespace alien {
 class message_queue;
 }
@@ -135,6 +154,87 @@ namespace rdma {
 class RDMAStack;
 }
 
+class smp_service_group;
+struct smp_service_group_config;
+
+namespace internal {
+
+unsigned smp_service_group_id(smp_service_group ssg);
+
+}
+
+/// Returns the default smp_service_group. This smp_service_group
+/// does not impose any limits on concurrency in the target shard.
+/// This makes is deadlock-safe, but can consume unbounded resources,
+/// and should therefore only be used when initiator concurrency is
+/// very low (e.g. administrative tasks).
+smp_service_group default_smp_service_group();
+
+/// Creates an smp_service_group with the specified configuration.
+///
+/// The smp_service_group is global, and after this call completes,
+/// the returned value can be used on any shard.
+future<smp_service_group> create_smp_service_group(smp_service_group_config ssgc);
+
+/// Destroy an smp_service_group.
+///
+/// Frees all resources used by an smp_service_group. It must not
+/// be used again once this function is called.
+future<> destroy_smp_service_group(smp_service_group ssg);
+
+/// A resource controller for cross-shard calls.
+///
+/// An smp_service_group allows you to limit the concurrency of
+/// smp::submit_to() and similar calls. While it's easy to limit
+/// the caller's concurrency (for example, by using a semaphore),
+/// the concurrency at the remote end can be multiplied by a factor
+/// of smp::count-1, which can be large.
+///
+/// The class is called a service _group_ because it can be used
+/// to group similar calls that share resource usage characteristics,
+/// need not be isolated from each other, but do need to be isolated
+/// from other groups. Calls in a group should not nest; doing so
+/// can result in ABA deadlocks.
+///
+/// Nested submit_to() calls must form a directed acyclic graph
+/// when considering their smp_service_groups as nodes. For example,
+/// if a call using ssg1 then invokes another call using ssg2, the
+/// internal call may not call again via either ssg1 or ssg2, or it
+/// may form a cycle (and risking an ABBA deadlock). Create a
+/// new smp_service_group_instead.
+class smp_service_group {
+    unsigned _id;
+private:
+    explicit smp_service_group(unsigned id) : _id(id) {}
+
+    friend unsigned internal::smp_service_group_id(smp_service_group ssg);
+    friend smp_service_group default_smp_service_group();
+    friend future<smp_service_group> create_smp_service_group(smp_service_group_config ssgc);
+};
+
+inline
+smp_service_group default_smp_service_group() {
+    return smp_service_group(0);
+}
+
+inline
+unsigned
+internal::smp_service_group_id(smp_service_group ssg) {
+    return ssg._id;
+}
+
+
+/// Configuration for smp_service_group objects.
+///
+/// \see create_smp_service_group()
+struct smp_service_group_config {
+    /// The maximum number of non-local requests that execute on a shard concurrently
+    ///
+    /// Will be adjusted upwards to allow at least one request per non-local shard.
+    unsigned max_nonlocal_requests = 0;
+};
+
+
 class smp_message_queue {
     static constexpr size_t queue_length = 128;
     static constexpr size_t batch_size = 16;
@@ -149,6 +249,7 @@ class smp_message_queue {
     struct lf_queue : lf_queue_remote, lf_queue_base {
         lf_queue(reactor* remote) : lf_queue_remote{remote} {}
         void maybe_wakeup();
+        ~lf_queue();
     };
     lf_queue _pending;
     lf_queue _completed;
@@ -169,6 +270,8 @@ class smp_message_queue {
         size_t _last_rcv_batch = 0;
     };
     struct work_item {
+        explicit work_item(smp_service_group ssg) : ssg(ssg) {}
+        smp_service_group ssg;
         scheduling_group sg = current_scheduling_group();
         virtual ~work_item() {}
         virtual void process() = 0;
@@ -184,11 +287,12 @@ class smp_message_queue {
         compat::optional<value_type> _result;
         std::exception_ptr _ex; // if !_result
         typename futurator::promise_type _promise; // used on local side
-        async_work_item(smp_message_queue& queue, Func&& func) : _queue(queue), _func(std::move(func)) {}
+        async_work_item(smp_message_queue& queue, smp_service_group ssg, Func&& func) : work_item(ssg), _queue(queue), _func(std::move(func)) {}
         virtual void process() override {
             try {
-              with_scheduling_group(this->sg, [this] {
-                futurator::apply(this->_func).then_wrapped([this] (auto f) {
+              // FIXME: future is discarded
+              (void)with_scheduling_group(this->sg, [this] {
+                return futurator::apply(this->_func).then_wrapped([this] (auto f) {
                     if (f.failed()) {
                         _ex = f.get_exception();
                     } else {
@@ -225,21 +329,21 @@ public:
     smp_message_queue(reactor* from, reactor* to);
     ~smp_message_queue();
     template <typename Func>
-    futurize_t<std::result_of_t<Func()>> submit(Func&& func) {
-        auto wi = std::make_unique<async_work_item<Func>>(*this, std::forward<Func>(func));
+    futurize_t<std::result_of_t<Func()>> submit(shard_id t, smp_service_group ssg, Func&& func) {
+        auto wi = std::make_unique<async_work_item<Func>>(*this, ssg, std::forward<Func>(func));
         auto fut = wi->get_future();
-        submit_item(std::move(wi));
+        submit_item(t, std::move(wi));
         return fut;
     }
     void start(unsigned cpuid);
     template<size_t PrefetchCnt, typename Func>
     size_t process_queue(lf_queue& q, Func process);
     size_t process_incoming();
-    size_t process_completions();
+    size_t process_completions(shard_id t);
     void stop();
 private:
     void work();
-    void submit_item(std::unique_ptr<work_item> wi);
+    void submit_item(shard_id t, std::unique_ptr<work_item> wi);
     void respond(work_item* wi);
     void move_pending();
     void flush_request_batch();
@@ -252,23 +356,6 @@ private:
 };
 
 class reactor_backend_selector;
-
-enum class open_flags {
-    rw = O_RDWR,
-    ro = O_RDONLY,
-    wo = O_WRONLY,
-    create = O_CREAT,
-    truncate = O_TRUNC,
-    exclusive = O_EXCL,
-};
-
-inline open_flags operator|(open_flags a, open_flags b) {
-    return open_flags(std::underlying_type_t<open_flags>(a) | std::underlying_type_t<open_flags>(b));
-}
-
-inline open_flags operator&(open_flags a, open_flags b) {
-    return open_flags(std::underlying_type_t<open_flags>(a) & std::underlying_type_t<open_flags>(b));
-}
 
 class reactor_backend;
 
@@ -375,6 +462,7 @@ public:
 
     std::unique_ptr<rdma::RDMAStack> _rdma_stack;
 private:
+    reactor_config _cfg;
     file_desc _notify_eventfd;
     file_desc _task_quota_timer;
 #ifdef HAVE_OSV
@@ -412,8 +500,8 @@ private:
     promise<> _start_promise;
     semaphore _cpu_started;
     internal::preemption_monitor _preemption_monitor{};
-    std::atomic<uint64_t> _tasks_processed = { 0 };
-    std::atomic<uint64_t> _polls = { 0 };
+    uint64_t _global_tasks_processed = 0;
+    uint64_t _polls = 0;
     std::unique_ptr<internal::cpu_stall_detector> _cpu_stall_detector;
 
     unsigned _max_task_backlog = 1000;
@@ -448,6 +536,9 @@ private:
         struct indirect_compare;
         sched_clock::duration _time_spent_on_task_quota_violations = {};
         seastar::metrics::metric_groups _metrics;
+        void rename(sstring new_name);
+    private:
+        void register_stats();
     };
     boost::container::static_vector<std::unique_ptr<task_queue>, max_scheduling_groups()> _task_queues;
     int64_t _last_vruntime = 0;
@@ -563,11 +654,15 @@ private:
     void reset_preemption_monitor();
     void service_highres_timer();
 public:
-    static boost::program_options::options_description get_options_description(std::chrono::duration<double> default_task_quota);
-    explicit reactor(unsigned id, reactor_backend_selector rbs);
+    static boost::program_options::options_description get_options_description(reactor_config cfg);
+    explicit reactor(unsigned id, reactor_backend_selector rbs, reactor_config cfg);
     reactor(const reactor&) = delete;
     ~reactor();
     void operator=(const reactor&) = delete;
+
+    sched_clock::duration uptime() {
+        return sched_clock::now() - _start_time;
+    }
 
     io_queue& get_io_queue(dev_t devid = 0) {
         auto queue = _io_queues.find(devid);
@@ -589,6 +684,7 @@ public:
     /// \param shares the new shares value
     /// \return a future that is ready when the share update is applied
     future<> update_shares_for_class(io_priority_class pc, uint32_t shares);
+    static future<> rename_priority_class(io_priority_class pc, sstring new_name);
 
     void configure(boost::program_options::variables_map config);
 
@@ -615,16 +711,21 @@ public:
 
     future<file> open_file_dma(sstring name, open_flags flags, file_open_options options = {});
     future<file> open_directory(sstring name);
-    future<> make_directory(sstring name);
-    future<> touch_directory(sstring name);
-    future<compat::optional<directory_entry_type>>  file_type(sstring name);
+    future<> make_directory(sstring name, file_permissions permissions = file_permissions::default_dir_permissions);
+    future<> touch_directory(sstring name, file_permissions permissions = file_permissions::default_dir_permissions);
+    future<compat::optional<directory_entry_type>>  file_type(sstring name, follow_symlink = follow_symlink::yes);
+    future<stat_data> file_stat(sstring pathname, follow_symlink);
     future<uint64_t> file_size(sstring pathname);
-    future<bool> file_exists(sstring pathname);
+    future<bool> file_accessible(sstring pathname, access_flags flags);
+    future<bool> file_exists(sstring pathname) {
+        return file_accessible(pathname, access_flags::exists);
+    }
     future<fs_type> file_system_at(sstring pathname);
     future<struct statvfs> statvfs(sstring pathname);
     future<> remove_file(sstring pathname);
     future<> rename_file(sstring old_pathname, sstring new_pathname);
     future<> link_file(sstring oldpath, sstring newpath);
+    future<> chmod(sstring name, file_permissions permissions);
 
     // In the following three methods, prepare_io is not guaranteed to execute in the same processor
     // in which it was generated. Therefore, care must be taken to avoid the use of objects that could
@@ -768,6 +869,7 @@ private:
     metrics::metric_groups _metric_groups;
     friend future<scheduling_group> create_scheduling_group(sstring name, float shares);
     friend future<> seastar::destroy_scheduling_group(scheduling_group);
+    friend future<> seastar::rename_scheduling_group(scheduling_group sg, sstring new_name);
 public:
     bool wait_and_process(int timeout = 0, const sigset_t* active_sigmask = nullptr);
     future<> readable(pollable_fd_state& fd);
@@ -841,7 +943,8 @@ class smp {
     using returns_void = std::is_same<std::result_of_t<Func()>, void>;
 public:
     static boost::program_options::options_description get_options_description();
-    static void configure(boost::program_options::variables_map vm);
+    static void register_network_stacks();
+    static void configure(boost::program_options::variables_map vm, reactor_config cfg = {});
     static void cleanup();
     static void cleanup_cpu();
     static void arrive_at_event_loop_end();
@@ -854,13 +957,17 @@ public:
     ///
     /// \param t designates the core to run the function on (may be a remote
     ///          core or the local core).
-    /// \param func a callable to run on core \c t.  If \c func is a temporary object,
-    ///          its lifetime will be extended by moving it.  If @func is a reference,
-    ///          the caller must guarantee that it will survive the call.
+    /// \param ssg an smp_service_group that controls resource allocation for this call.
+    /// \param func a callable to run on core \c t.
+    ///          If \c func is a temporary object, its lifetime will be
+    ///          extended by moving. This movement and the eventual
+    ///          destruction of func are both done in the _calling_ core.
+    ///          If \c func is a reference, the caller must guarantee that
+    ///          it will survive the call.
     /// \return whatever \c func returns, as a future<> (if \c func does not return a future,
     ///         submit_to() will wrap it in a future<>).
     template <typename Func>
-    static futurize_t<std::result_of_t<Func()>> submit_to(unsigned t, Func&& func) {
+    static futurize_t<std::result_of_t<Func()>> submit_to(unsigned t, smp_service_group ssg, Func&& func) {
         using ret_type = std::result_of_t<Func()>;
         if (t == engine().cpu_id()) {
             try {
@@ -881,8 +988,26 @@ public:
                 return futurize<std::result_of_t<Func()>>::make_exception_future(std::current_exception());
             }
         } else {
-            return _qs[t][engine().cpu_id()].submit(std::forward<Func>(func));
+            return _qs[t][engine().cpu_id()].submit(t, ssg, std::forward<Func>(func));
         }
+    }
+    /// Runs a function on a remote core.
+    ///
+    /// Uses default_smp_service_group() to control resource allocation.
+    ///
+    /// \param t designates the core to run the function on (may be a remote
+    ///          core or the local core).
+    /// \param func a callable to run on core \c t.
+    ///          If \c func is a temporary object, its lifetime will be
+    ///          extended by moving. This movement and the eventual
+    ///          destruction of func are both done in the _calling_ core.
+    ///          If \c func is a reference, the caller must guarantee that
+    ///          it will survive the call.
+    /// \return whatever \c func returns, as a future<> (if \c func does not return a future,
+    ///         submit_to() will wrap it in a future<>).
+    template <typename Func>
+    static futurize_t<std::result_of_t<Func()>> submit_to(unsigned t, Func&& func) {
+        return submit_to(t, default_smp_service_group(), std::forward<Func>(func));
     }
     static bool poll_queues();
     static bool pure_poll_queues();
@@ -903,7 +1028,7 @@ public:
 private:
     static void start_all_queues();
     static void pin(unsigned cpu_id);
-    static void allocate_reactor(unsigned id, reactor_backend_selector rbs);
+    static void allocate_reactor(unsigned id, reactor_backend_selector rbs, reactor_config cfg);
     static void create_thread(std::function<void ()> thread_loop);
 public:
     static unsigned count;
@@ -923,91 +1048,6 @@ size_t iovec_len(const iovec* begin, size_t len)
         ret += begin++->iov_len;
     }
     return ret;
-}
-
-template <typename Clock>
-inline
-timer<Clock>::timer(callback_t&& callback) : _callback(std::move(callback)) {
-}
-
-template <typename Clock>
-inline
-timer<Clock>::~timer() {
-    if (_queued) {
-        engine().del_timer(this);
-    }
-}
-
-template <typename Clock>
-inline
-void timer<Clock>::set_callback(callback_t&& callback) {
-    _callback = std::move(callback);
-}
-
-template <typename Clock>
-inline
-void timer<Clock>::arm_state(time_point until, compat::optional<duration> period) {
-    assert(!_armed);
-    _period = period;
-    _armed = true;
-    _expired = false;
-    _expiry = until;
-    _queued = true;
-}
-
-template <typename Clock>
-inline
-void timer<Clock>::arm(time_point until, compat::optional<duration> period) {
-    arm_state(until, period);
-    engine().add_timer(this);
-}
-
-template <typename Clock>
-inline
-void timer<Clock>::rearm(time_point until, compat::optional<duration> period) {
-    if (_armed) {
-        cancel();
-    }
-    arm(until, period);
-}
-
-template <typename Clock>
-inline
-void timer<Clock>::arm(duration delta) {
-    return arm(Clock::now() + delta);
-}
-
-template <typename Clock>
-inline
-void timer<Clock>::arm_periodic(duration delta) {
-    arm(Clock::now() + delta, {delta});
-}
-
-template <typename Clock>
-inline
-void timer<Clock>::readd_periodic() {
-    arm_state(Clock::now() + _period.value(), {_period.value()});
-    engine().queue_timer(this);
-}
-
-template <typename Clock>
-inline
-bool timer<Clock>::cancel() {
-    if (!_armed) {
-        return false;
-    }
-    _armed = false;
-    if (_queued) {
-        engine().del_timer(this);
-        _queued = false;
-    }
-    return true;
-}
-
-template <typename Clock>
-inline
-typename timer<Clock>::time_point timer<Clock>::get_timeout() {
-    return _expiry;
 }
 
 extern logger seastar_logger;

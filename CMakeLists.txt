@@ -28,6 +28,14 @@ list (APPEND CMAKE_MODULE_PATH
 
 include (Cooking OPTIONAL)
 
+# This variable impacts the way DPDK is configured by cmake-cooking (if DPDK is enabled), so its definition needs to
+# come before PROJECT.
+set (Seastar_DPDK_MACHINE
+  "native"
+  CACHE
+  STRING
+  "Configure DPDK for this processor architecture (if `Seastar_DPDK` is enabled). A DPDK code name abbreviation (e.g., ivb)")
+
 project (Seastar
   VERSION 1.0
   LANGUAGES CXX)
@@ -83,11 +91,45 @@ mark_as_advanced (
     CMAKE_EXE_LINKER_FLAGS_DEV
     CMAKE_SHARED_LINKER_FLAGS_DEV)
 
+set (CMAKE_CXX_FLAGS_SANITIZE
+  "-Os -g"
+  CACHE
+  STRING
+  "Flags used by the C++ compiler during sanitize builds."
+  FORCE)
+
+set (CMAKE_C_FLAGS_SANITIZE
+  "-Os -g"
+  CACHE
+  STRING
+  "Flags used by the C compiler during sanitize builds."
+  FORCE)
+
+set (CMAKE_EXE_LINKER_FLAGS_SANITIZE
+  ""
+  CACHE
+  STRING
+  "Flags used for linking binaries during sanitize builds."
+  FORCE)
+
+set (CMAKE_SHARED_LINKER_FLAGS_SANITIZE
+  ""
+  CACHE
+  STRING
+  "Flags used by the shared libraries linker during sanitize builds."
+  FORCE)
+
+mark_as_advanced (
+    CMAKE_CXX_FLAGS_SANITIZE
+    CMAKE_C_FLAGS_SANITIZE
+    CMAKE_EXE_LINKER_FLAGS_SANITIZE
+    CMAKE_SHARED_LINKER_FLAGS_SANITIZE)
+
 set (CMAKE_BUILD_TYPE
   "${CMAKE_BUILD_TYPE}"
   CACHE
   STRING
-  "Choose the type of build, options are: None Debug Release RelWithDebInfo MinSizeRel Dev."
+  "Choose the type of build, options are: None Debug Release RelWithDebInfo MinSizeRel Dev Sanitize."
   FORCE)
 
 if (NOT CMAKE_BUILD_TYPE)
@@ -127,10 +169,6 @@ option (Seastar_DOCS
 option (Seastar_DPDK
   "Enable DPDK support."
   OFF)
-
-option (Seastar_EXCEPTION_SCALABILITY_WORKAROUND
-  "Enable a workaround for C++ exception scalability issues by overriding the definition of `dl_iterate_phdr`. Disabled for non-release builds."
-  ON)
 
 option (Seastar_EXCLUDE_APPS_FROM_ALL
   "When enabled alongside Seastar_APPS, do not build applications by default."
@@ -198,6 +236,10 @@ set (Seastar_TEST_TIMEOUT
   STRING
   "Maximum allowed time for a test to run, in seconds.")
 
+option (Seastar_UNUSED_RESULT_ERROR
+  "Make [[nodiscard]] violations an error (instead of a warning)."
+  OFF)
+
 # When Seastar is embedded with `add_subdirectory`, disable the non-library targets.
 if (NOT (CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR))
   set (Seastar_APPS OFF)
@@ -248,16 +290,12 @@ find_package (LinuxMembarrier)
 find_package (Sanitizers)
 find_package (Protobuf 2.5.0 REQUIRED)
 find_package (StdAtomic REQUIRED)
+include (SeastarDependencies)
 set (StdFilesystem_CXX_DIALECT ${Seastar_CXX_DIALECT})
-find_package (StdFilesystem REQUIRED)
-find_package (hwloc 1.11.2)
-# No version information published.
-find_package (lksctp-tools REQUIRED)
-# No version information published.
-find_package (numactl)
+seastar_find_dependencies ()
+
+# Private build dependencies not visible to consumers
 find_package (ragel 6.10 REQUIRED)
-find_package (rt REQUIRED)
-find_package (yaml-cpp 0.5.1 REQUIRED)
 
 find_library(VERBS ibverbs REQUIRED)
 
@@ -376,6 +414,7 @@ add_library (seastar STATIC
   include/seastar/core/expiring_fifo.hh
   include/seastar/core/fair_queue.hh
   include/seastar/core/file.hh
+  include/seastar/core/file-types.hh
   include/seastar/core/fsqual.hh
   include/seastar/core/fstream.hh
   include/seastar/core/function_traits.hh
@@ -482,6 +521,7 @@ add_library (seastar STATIC
   include/seastar/net/virtio-interface.hh
   include/seastar/net/virtio.hh
   include/seastar/rpc/lz4_compressor.hh
+  include/seastar/rpc/lz4_fragmented_compressor.hh
   include/seastar/rpc/multi_algo_compressor_factory.hh
   include/seastar/rpc/rpc.hh
   include/seastar/rpc/rpc_impl.hh
@@ -531,6 +571,7 @@ add_library (seastar STATIC
   src/core/scollectd-impl.hh
   src/core/systemwide_memory_barrier.cc
   src/core/thread.cc
+  src/core/uname.cc
   src/core/vla.hh
   src/http/api_docs.cc
   src/http/common.cc
@@ -566,6 +607,7 @@ add_library (seastar STATIC
   src/net/udp.cc
   src/net/virtio.cc
   src/rpc/lz4_compressor.cc
+  src/rpc/lz4_fragmented_compressor.cc
   src/rpc/rpc.cc
   src/util/alloc_failure_injector.cc
   src/util/backtrace.cc
@@ -590,17 +632,24 @@ target_include_directories (seastar
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${Seastar_GEN_BINARY_DIR}/src)
 
-set (Seastar_DEVELOPMENT_FLAGS
+set (Seastar_PRIVATE_CXX_FLAGS
   -fvisibility=hidden
   -UNDEBUG
   -Wall
-  -Werror)
+  -Werror
+  -Wno-error=deprecated-declarations)
 
 if (Seastar_COMPRESS_DEBUG)
   # -gz doesn't imply -g, so it is safe to add it regardless of debug
   # info being enabled.
-  list (APPEND Seastar_DEVELOPMENT_FLAGS -gz)
+  list (APPEND Seastar_PRIVATE_CXX_FLAGS -gz)
 endif()
+
+if ((CMAKE_BUILD_TYPE STREQUAL "Debug") OR (CMAKE_BUILD_TYPE STREQUAL "Sanitize"))
+  if (NOT Sanitizers_FOUND)
+    message (FATAL_ERROR "Sanitizers are required for debug and sanitize modes!")
+  endif ()
+endif ()
 
 target_link_libraries (seastar
   PUBLIC
@@ -624,6 +673,14 @@ target_link_libraries (seastar
     yaml-cpp::yaml-cpp
     "${VERBS}")
 
+if ((CMAKE_BUILD_TYPE STREQUAL "Debug") OR (CMAKE_BUILD_TYPE STREQUAL "Sanitize"))
+  set (Seastar_Sanitizers_OPTIONS ${Sanitizers_COMPILER_OPTIONS})
+  target_link_libraries (seastar
+    PUBLIC
+      Sanitizers::address
+      Sanitizers::undefined_behavior)
+endif ()
+
 #
 # We want asserts enabled on all modes, but cmake defaults to passing
 # -DNDEBUG in some modes. We add -UNDEBUG to our private options to
@@ -640,6 +697,23 @@ target_compile_options (seastar
     -std=${Seastar_CXX_DIALECT}
     -U_FORTIFY_SOURCE)
 
+function (seastar_supports_flag flag var)
+  set (CMAKE_REQUIRED_FLAGS ${flag})
+  check_cxx_source_compiles ("int main() { return 0; }" result)
+  set (${var} ${result} PARENT_SCOPE)
+endfunction ()
+
+seastar_supports_flag ("-Wno-maybe-uninitialized -Werror" MaybeUninitialized_FOUND)
+if (MaybeUninitialized_FOUND)
+  target_compile_options (seastar
+    PUBLIC
+      # With std::experimental::optional it is easy to hit
+      # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=88897.  We disable
+      # -Wmaybe-uninitialized in here since otherwise we would have to
+      # disable it on many types used inside optional<>.
+      -Wno-maybe-uninitialized)
+endif ()
+
 if (Seastar_EXPERIMENTAL_COROUTINES_TS)
   target_compile_options (seastar PUBLIC -fcoroutines-ts -g)
   target_compile_definitions (seastar PUBLIC SEASTAR_COROUTINES_TS)
@@ -654,7 +728,7 @@ if (Seastar_GCC6_CONCEPTS OR Concepts_FOUND)
 endif ()
 
 if (LinuxMembarrier_FOUND)
-  list (APPEND Seastar_DEVELOPMENT_DEFINES SEASTAR_HAS_MEMBARRIER)
+  list (APPEND Seastar_PRIVATE_COMPILE_DEFINITIONS SEASTAR_HAS_MEMBARRIER)
 
   target_link_libraries (seastar
     PRIVATE LinuxMembarrier::membarrier)
@@ -670,13 +744,17 @@ if (Seastar_STD_OPTIONAL_VARIANT_STRINGVIEW)
     PUBLIC SEASTAR_USE_STD_OPTIONAL_VARIANT_STRINGVIEW)
 endif ()
 
+if (Sanitizers_FIBER_SUPPORT)
+  list (APPEND Seastar_PRIVATE_COMPILE_DEFINITIONS SEASTAR_HAVE_ASAN_FIBER_SUPPORT)
+endif ()
+
 if (Seastar_ALLOC_PAGE_SIZE)
   target_compile_definitions (seastar
     PUBLIC SEASTAR_OVERRIDE_ALLOCATOR_PAGE_SIZE=${Seastar_ALLOC_PAGE_SIZE})
 endif ()
 
 if (Seastar_CXX_FLAGS)
-  list (APPEND Seastar_DEVELOPMENT_FLAGS ${Seastar_CXX_FLAGS})
+  list (APPEND Seastar_PRIVATE_CXX_FLAGS ${Seastar_CXX_FLAGS})
 endif ()
 
 # When using split dwarf --gdb-index is effectively required since
@@ -695,15 +773,31 @@ if (Seastar_DPDK)
     message (FATAL_ERROR "dpdk support is enabled but it is not available!")
   endif ()
 
+  #
+  # The DPDK architecture needs to be transitively applied to consumers of Seastar as well.
+  #
+
+  set (Seastar_ARCH_FOR_native "native")
+  set (Seastar_ARCH_FOR_nhm "nehalem")
+  set (Seastar_ARCH_FOR_wsm "westmere")
+  set (Seastar_ARCH_FOR_snb "sandybridge")
+  set (Seastar_ARCH_FOR_ivb "ivybridge")
+  set (Seastar_ARCH_FOR_armv8a "armv8-a")
+  set (Seastar_ARCH ${Seastar_ARCH_FOR_${Seastar_DPDK_MACHINE}})
+
+  if (NOT Seastar_ARCH)
+    message (FATAL_ERROR "Unrecognized DPDK machine identifier: ${Seastar_DPDK_MACHINE}")
+  endif ()
+
+  target_compile_options (seastar
+    PUBLIC -march=${Seastar_ARCH})
+
   target_compile_definitions (seastar
     PUBLIC SEASTAR_HAVE_DPDK)
 
+  # No pmd driver code will be pulled in without "--whole-archive"
   target_link_libraries (seastar
-    PUBLIC dpdk::dpdk)
-endif ()
-
-if ((CMAKE_BUILD_TYPE STREQUAL "Debug") OR (NOT Seastar_EXCEPTION_SCALABILITY_WORKAROUND))
-  list (APPEND Seastar_DEVELOPMENT_DEFINES SEASTAR_NO_EXCEPTION_HACK)
+    PUBLIC -Wl,--whole-archive dpdk::dpdk -Wl,--no-whole-archive)
 endif ()
 
 if (Seastar_HWLOC)
@@ -711,7 +805,7 @@ if (Seastar_HWLOC)
     message (FATAL_ERROR "`hwloc` support is enabled but it is not available!")
   endif ()
 
-  list (APPEND Seastar_DEVELOPMENT_DEFINES SEASTAR_HAVE_HWLOC)
+  list (APPEND Seastar_PRIVATE_COMPILE_DEFINITIONS SEASTAR_HAVE_HWLOC)
 
   target_link_libraries (seastar
     PRIVATE hwloc::hwloc)
@@ -728,17 +822,28 @@ if (Seastar_NUMA)
     message (FATAL_ERROR "NUMA support is enabled but `numactl` is not available!")
   endif ()
 
-  list (APPEND Seastar_DEVELOPMENT_DEFINES SEASTAR_HAVE_NUMA)
+  list (APPEND Seastar_PRIVATE_COMPILE_DEFINITIONS SEASTAR_HAVE_NUMA)
 
   target_link_libraries (seastar
     PRIVATE numactl::numactl)
 endif ()
 
 if (lz4_HAVE_COMPRESS_DEFAULT)
-  list (APPEND Seastar_DEVELOPMENT_DEFINES SEASTAR_HAVE_LZ4_COMPRESS_DEFAULT)
+  list (APPEND Seastar_PRIVATE_COMPILE_DEFINITIONS SEASTAR_HAVE_LZ4_COMPRESS_DEFAULT)
 endif ()
 
-if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+seastar_supports_flag ("-Werror=unused-result" ErrorUnused_FOUND)
+if (ErrorUnused_FOUND)
+  if (Seastar_UNUSED_RESULT_ERROR)
+    target_compile_options (seastar
+      PUBLIC -Werror=unused-result)
+  else()
+    target_compile_options (seastar
+      PUBLIC -Wno-error=unused-result)
+  endif ()
+endif ()
+
+if ((CMAKE_BUILD_TYPE STREQUAL "Debug") OR (CMAKE_BUILD_TYPE STREQUAL "Sanitize"))
   target_compile_definitions (seastar
     PUBLIC
       SEASTAR_DEBUG
@@ -748,21 +853,27 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
       SEASTAR_THREAD_STACK_GUARDS)
 endif ()
 
+if ((CMAKE_BUILD_TYPE STREQUAL "Dev") OR (CMAKE_BUILD_TYPE STREQUAL "Debug"))
+  target_compile_definitions (seastar
+    PUBLIC
+      SEASTAR_TYPE_ERASE_MORE)
+endif ()
+
 target_compile_definitions (seastar
-  PRIVATE ${Seastar_DEVELOPMENT_DEFINES})
+  PRIVATE ${Seastar_PRIVATE_COMPILE_DEFINITIONS})
 
 target_compile_options (seastar
-  PRIVATE ${Seastar_DEVELOPMENT_FLAGS})
+  PRIVATE ${Seastar_PRIVATE_CXX_FLAGS})
 
-add_library (seastar_with_flags INTERFACE)
+add_library (seastar_private INTERFACE)
 
-target_compile_definitions (seastar_with_flags
-  INTERFACE ${Seastar_DEVELOPMENT_DEFINES})
+target_compile_definitions (seastar_private
+  INTERFACE ${Seastar_PRIVATE_COMPILE_DEFINITIONS})
 
-target_compile_options (seastar_with_flags
-  INTERFACE ${Seastar_DEVELOPMENT_FLAGS})
+target_compile_options (seastar_private
+  INTERFACE ${Seastar_PRIVATE_CXX_FLAGS})
 
-target_link_libraries (seastar_with_flags
+target_link_libraries (seastar_private
   INTERFACE seastar)
 
 #
@@ -785,10 +896,10 @@ if (Seastar_INSTALL OR Seastar_TESTING)
 
   target_compile_definitions (seastar_testing
     PUBLIC BOOST_TEST_DYN_LINK
-    PRIVATE ${Seastar_DEVELOPMENT_DEFINES})
+    PRIVATE ${Seastar_PRIVATE_COMPILE_DEFINITIONS})
 
   target_compile_options (seastar_testing
-    PRIVATE ${Seastar_DEVELOPMENT_FLAGS})
+    PRIVATE ${Seastar_PRIVATE_CXX_FLAGS})
 
   target_link_libraries (seastar_testing
     PUBLIC
@@ -956,7 +1067,7 @@ if (Seastar_INSTALL)
 
   install (
     FILES
-      ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindBoost.cmake
+      ${CMAKE_CURRENT_SOURCE_DIR}/cmake/bundled_boost/FindBoost.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindConcepts.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindGnuTLS.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindLinuxMembarrier.cmake
@@ -975,6 +1086,7 @@ if (Seastar_INSTALL)
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Findragel.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Findrt.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Findyaml-cpp.cmake
+      ${CMAKE_CURRENT_SOURCE_DIR}/cmake/SeastarDependencies.cmake
     DESTINATION ${install_cmakedir})
 
   install (

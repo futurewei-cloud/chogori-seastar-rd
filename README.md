@@ -35,6 +35,35 @@ then compile:
 $ ninja -C build/release
 ```
 
+If you're missing a dependency of Seastar, then it is possible to have the configuration process fetch a version of the dependency locally for development.
+
+For example, to fetch `fmt` locally, configure Seastar like this:
+
+```
+$ ./configure.py --mode=dev --cook fmt
+```
+
+`--cook` can be repeated many times for selecting multiple dependencies.
+
+
+Build modes
+----------------------------------------------------------------------------
+
+The configure.py script is a wrapper around cmake. The --mode argument
+maps to CMAKE_BUILD_TYPE, and supports the following modes
+
+          | CMake mode        | Debug info | Optimizations  | Sanitizers   | Allocator | Checks   | Use for                                |
+ ---------+-------------------+------------+----------------+--------------+-----------+----------+----------------------------------------|
+ debug    | Debug             | Yes        | -O0            | ASAN, UBSAN  | System    | All      | gdb                                    |
+ release  | RelWithDebInfo    | Yes        | -O3            | None         | Seastar   | Asserts  | production                             |
+ dev      | Dev (Custom)      | No         | -O1            | None         | Seastar   | Asserts  | build and test cycle                   |
+ sanitize | Sanitize (Custom) | Yes        | -Os            | ASAN, UBSAN  | System    | All      | second level of tests, track down bugs |
+
+Note that seastar is more sensitive to allocators and optimizations than
+usual. A quick rule of the thumb of the relative performances is that
+release is 2 times faster than dev, 150 times faster than sanitize and
+300 times faster than debug.
+
 Using Seastar from its build directory (without installation)
 ----------------------------------------------------------------------------
 
@@ -79,7 +108,6 @@ You can also consume Seastar after it has been installed to the file-system.
 
 **Important:**
 
-- The [fmt library](https://github.com/fmtlib/fmt) is not typically available as a system package, so Seastar by default builds and installs the fmt submodule to `$build_dir/_cooking/installed`
 - Seastar works with a customized version of DPDK, so by default builds and installs the DPDK submodule to `$build_dir/_cooking/installed`
 
 First, configure the installation path:
@@ -112,13 +140,17 @@ There are also instructions for building on any host that supports [Docker](doc/
 
 Use of the [DPDK](http://dpdk.org) is [optional](doc/building-dpdk.md).
 
-#### Using C++17
+#### Seastar's C++ dialect: C++14 or C++17
 
-Seastar can be built with the C++17 dialect by supporting compilers, conditional
-on the `Seastar_CXX_DIALECT` CMake variable being set to `"gnu++17"`.
+Seastar supports both C++14, and C++17. Some newer features and optimizations
+may only be available to C++17, so users are encouraged to use C++17 when
+possible. By default Seastar builds with the C++17 dialect, but a C++14
+compilation can be requested with a `./configure.py --c++-dialect=gnu++14`
+or, if using CMake directly, by setting on the `Seastar_CXX_DIALECT` CMake
+variable to `"gnu++14"`.
 
 However, by default Seastar uses C++14-compatible types such as
-`std::experimental::optional<>` or `boost::variant`, both internally and in its public
+`std::experimental::optional<>`, `boost::variant` and `std::experimental::string_view`, both internally and in its public
 API, thus forcing them on C++17 projects. To fix this, Seastar respects the value of the preprocessor variable
 `SEASTAR_USE_STD_OPTIONAL_VARIANT_STRINGVIEW`, which changes those types to their `stdlib` incarnation, and allows
 seemless use of C++17. Usage of this option requires an updated compiler, such
@@ -129,7 +161,7 @@ Getting started
 
 There is a [mini tutorial](doc/mini-tutorial.md) and a [more comprehensive one](doc/tutorial.md).
 
-The documentation is available on the [web](http://docs.seastar-project.org/).
+The documentation is available on the [web](http://docs.seastar.io/master/index.html).
 
 
 Resources

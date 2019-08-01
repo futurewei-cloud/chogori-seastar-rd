@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 #
 # This file is open source software, licensed to you under the terms
 # of the Apache License, Version 2.0 (the "License").  See the NOTICE file
@@ -71,6 +71,8 @@ arg_parser.add_argument('--c-compiler', action='store', dest='cc', default='gcc'
                         help = 'C compiler path (for bundled libraries such as dpdk)')
 arg_parser.add_argument('--c++-dialect', action='store', dest='cpp_dialect', default='',
                         help='C++ dialect to build with [default: %(default)s]')
+arg_parser.add_argument('--cook', action='append', dest='cook', default=[],
+                        help='Supply this dependency locally for development via `cmake-cooking` (can be repeated)')
 add_tristate(
     arg_parser,
     name = 'dpdk',
@@ -89,19 +91,19 @@ add_tristate(
 add_tristate(
     arg_parser,
     name = 'alloc-failure-injector',
-    dest = 'alloc_failure_injector',
+    dest = 'alloc_failure_injection',
     help = 'allocation failure injection')
-add_tristate(
-    arg_parser,
-    name = 'exception-scalability-workaround',
-    dest = 'exception_workaround',
-    help = 'a workaround for C++ exception scalability issues by overriding the definition of `dl_iterate_phdr`')
 add_tristate(
     arg_parser,
     name = 'experimental-coroutines-ts',
     dest = "coroutines_ts",
     help = 'experimental support for Coroutines TS')
-arg_parser.add_argument('--allocator-page-size', dest='allocator_page_size', type=int, help='override allocator page size')
+add_tristate(
+    arg_parser,
+    name = 'unused-result-error',
+    dest = "unused_result_error",
+    help = 'Make [[nodiscard]] violations an error')
+arg_parser.add_argument('--allocator-page-size', dest='alloc_page_size', type=int, help='override allocator page size')
 arg_parser.add_argument('--without-tests', dest='exclude_tests', action='store_true', help='Do not build tests by default')
 arg_parser.add_argument('--without-apps', dest='exclude_apps', action='store_true', help='Do not build applications by default')
 arg_parser.add_argument('--without-demos', dest='exclude_demos', action='store_true', help='Do not build demonstrations by default')
@@ -131,12 +133,37 @@ if args.cpp_dialect == '':
     cpp_dialects = ['gnu++17', 'gnu++1z', 'gnu++14', 'gnu++1y']
     args.cpp_dialect = identify_best_dialect(cpp_dialects, compiler=args.cxx)
 
+def infer_dpdk_machine(user_cflags):
+    """Infer the DPDK machine identifier (e.g., 'ivb') from the space-separated
+    string of user cflags by scraping the value of `-march` if it is present.
+
+    The default if no architecture is indicated is 'native'.
+    """
+    arch = 'native'
+
+    # `-march` may be repeated, and we want the last one.
+    # strip features, leave only the arch: armv8-a+crc+crypto -> armv8-a
+    for flag in user_cflags.split():
+        if flag.startswith('-march'):
+            arch = flag[7:].split('+')[0]
+
+    MAPPING = {
+        'native': 'native',
+        'nehalem': 'nhm',
+        'westmere': 'wsm',
+        'sandybridge': 'snb',
+        'ivybridge': 'ivb',
+        'armv8-a': 'armv8a',
+    }
+
+    return MAPPING.get(arch, 'native')
+
 MODES = seastar_cmake.SUPPORTED_MODES if args.mode == 'all' else [args.mode]
 
 # For convenience.
 tr = seastar_cmake.translate_arg
 
-MODE_TO_CMAKE_BUILD_TYPE = {'release' : 'RelWithDebInfo', 'debug' : 'Debug', 'dev' : 'Dev' }
+MODE_TO_CMAKE_BUILD_TYPE = {'release' : 'RelWithDebInfo', 'debug' : 'Debug', 'dev' : 'Dev', 'sanitize' : 'Sanitize' }
 
 def configure_mode(mode):
     BUILD_PATH = seastar_cmake.BUILD_PATHS[mode]
@@ -159,21 +186,42 @@ def configure_mode(mode):
         tr(LDFLAGS, 'LD_FLAGS'),
         tr(args.cpp_dialect, 'CXX_DIALECT'),
         tr(args.dpdk, 'DPDK'),
+        tr(infer_dpdk_machine(args.user_cflags), 'DPDK_MACHINE'),
         tr(args.hwloc, 'HWLOC', value_when_none='yes'),
         tr(args.gcc6_concepts, 'GCC6_CONCEPTS'),
-        tr(args.alloc_failure_injector, 'ALLOC_FAILURE_INJECTOR'),
-        tr(args.exception_workaround, 'EXCEPTION_SCALABILITY_WORKAROUND', value_when_none='yes'),
-        tr(args.allocator_page_size, 'ALLOCATOR_PAGE_SIZE'),
+        tr(args.alloc_failure_injection, 'ALLOC_FAILURE_INJECTION'),
+        tr(args.alloc_page_size, 'ALLOC_PAGE_SIZE'),
         tr(args.cpp17_goodies, 'STD_OPTIONAL_VARIANT_STRINGVIEW'),
         tr(args.split_dwarf, 'SPLIT_DWARF'),
         tr(args.coroutines_ts, 'EXPERIMENTAL_COROUTINES_TS'),
+        tr(args.unused_result_error, 'UNUSED_RESULT_ERROR'),
     ]
 
+    ingredients_to_cook = set(args.cook)
+
+    if args.dpdk:
+        ingredients_to_cook.add('dpdk')
+
     # Generate a new build by pointing to the source directory.
-    ARGS = seastar_cmake.COOKING_BASIC_ARGS + ['-d', BUILD_PATH, '--'] + TRANSLATED_ARGS
+    if ingredients_to_cook:
+        # We need to use cmake-cooking for some dependencies.
+        inclusion_arguments = []
+
+        for ingredient in ingredients_to_cook:
+            inclusion_arguments.extend(['-i', ingredient])
+
+        ARGS = seastar_cmake.COOKING_BASIC_ARGS + inclusion_arguments + ['-d', BUILD_PATH, '--']
+        dir = seastar_cmake.ROOT_PATH
+    else:
+        # When building without cooked dependencies, we can invoke cmake directly. We can't call
+        # cooking.sh, because without any -i parameters, it will try to build
+        # everything.
+        ARGS = ['cmake', '-G', 'Ninja', '../..']
+        dir = BUILD_PATH
+    ARGS += TRANSLATED_ARGS
     print(ARGS)
     distutils.dir_util.mkpath(BUILD_PATH)
-    subprocess.check_call(ARGS, shell=False, cwd=seastar_cmake.ROOT_PATH)
+    subprocess.check_call(ARGS, shell=False, cwd=dir)
 
 for mode in MODES:
     configure_mode(mode)

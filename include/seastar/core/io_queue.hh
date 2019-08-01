@@ -30,6 +30,19 @@
 
 namespace seastar {
 
+/// Renames an io priority class
+///
+/// Renames an \ref io_priority_class previously created with register_one_priority_class().
+///
+/// The operation is global and affects all shards.
+/// The operation affects the exported statistics labels.
+///
+/// \param pc The io priority class to be renamed
+/// \param new_name The new name for the io priority class
+/// \return a future that is ready when the io priority class have been renamed
+future<>
+rename_priority_class(io_priority_class pc, sstring new_name);
+
 namespace internal {
 namespace linux_abi {
 
@@ -52,19 +65,22 @@ private:
         std::chrono::duration<double> queue_time;
         metrics::metric_groups _metric_groups;
         priority_class_data(sstring name, sstring mountpoint, priority_class_ptr ptr, shard_id owner);
+        void rename(sstring new_name, sstring mountpoint, shard_id owner);
+    private:
+        void register_stats(sstring name, sstring mountpoint, shard_id owner);
     };
 
-    std::unordered_map<unsigned, lw_shared_ptr<priority_class_data>> _priority_classes;
+    std::vector<std::vector<lw_shared_ptr<priority_class_data>>> _priority_classes;
     fair_queue _fq;
 
     static constexpr unsigned _max_classes = 2048;
-    static std::array<std::atomic<uint32_t>, _max_classes> _registered_shares;
+    static std::mutex _register_lock;
+    static std::array<uint32_t, _max_classes> _registered_shares;
     static std::array<sstring, _max_classes> _registered_names;
 
     static io_priority_class register_one_priority_class(sstring name, uint32_t shares);
 
     priority_class_data& find_or_create_class(const io_priority_class& pc, shard_id owner);
-    static void fill_shares_array();
     friend smp;
 public:
     enum class request_type { read, write };
@@ -132,6 +148,7 @@ public:
     }
 
     future<> update_shares_for_class(io_priority_class pc, size_t new_shares);
+    void rename_priority_class(io_priority_class pc, sstring new_name);
 
     friend class reactor;
 private:

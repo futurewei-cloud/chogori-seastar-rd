@@ -27,7 +27,7 @@
 #include <boost/any.hpp>
 #include <boost/type.hpp>
 #include <seastar/util/std-compat.hh>
-#include <boost/variant.hpp>
+#include <seastar/util/variant_utils.hh>
 #include <seastar/core/timer.hh>
 #include <seastar/core/simple-stream.hh>
 #include <seastar/core/lowres_clock.hh>
@@ -177,9 +177,13 @@ struct rcv_buf {
     using iterator = std::vector<temporary_buffer<char>>::iterator;
     rcv_buf() {}
     explicit rcv_buf(size_t size_) : size(size_) {}
+    explicit rcv_buf(temporary_buffer<char> b) : size(b.size()), bufs(std::move(b)) {};
+    explicit rcv_buf(std::vector<temporary_buffer<char>> bufs, size_t size)
+        : size(size), bufs(std::move(bufs)) {};
 };
 
 struct snd_buf {
+    // Preferred, but not required, chunk size.
     static constexpr size_t chunk_size = 128*1024;
     uint32_t size = 0;
     compat::variant<std::vector<temporary_buffer<char>>, temporary_buffer<char>> bufs;
@@ -187,6 +191,10 @@ struct snd_buf {
     snd_buf() {}
     explicit snd_buf(size_t size_);
     explicit snd_buf(temporary_buffer<char> b) : size(b.size()), bufs(std::move(b)) {};
+
+    explicit snd_buf(std::vector<temporary_buffer<char>> bufs, size_t size)
+        : size(size), bufs(std::move(bufs)) {};
+
     temporary_buffer<char>& front();
 };
 
@@ -227,14 +235,20 @@ struct connection_id {
         return id == o.id;
     }
     operator bool() const {
-        return id;
+        return shard() != 0xffff;
     }
-    size_t shard() {
+    size_t shard() const {
         return size_t(id & 0xffff);
+    }
+    constexpr static connection_id make_invalid_id(uint64_t id = 0) {
+        return make_id(id, 0xffff);
+    }
+    constexpr static connection_id make_id(uint64_t id, uint16_t shard) {
+        return {id << 16 | shard};
     }
 };
 
-constexpr connection_id invalid_connection_id{0};
+constexpr connection_id invalid_connection_id = connection_id::make_invalid_id();
 
 std::ostream& operator<<(std::ostream&, const connection_id&);
 
@@ -256,6 +270,7 @@ public:
         virtual ~impl() {};
         virtual future<> operator()(const Out&... args) = 0;
         virtual future<> close() = 0;
+        virtual future<> flush() = 0;
         friend sink;
     };
 
@@ -269,6 +284,13 @@ public:
     }
     future<> close() {
         return _impl->close();
+    }
+    // Calling this function makes sure that any data buffered
+    // by the stream sink will be flushed to the network.
+    // It does not mean the data was received by the corresponding
+    // source.
+    future<> flush() {
+        return _impl->flush();
     }
     connection_id get_id() const;
 };
