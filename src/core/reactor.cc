@@ -128,8 +128,6 @@
 
 namespace seastar {
 
-static void register_network_stacks();
-
 struct mountpoint_params {
     std::string mountpoint = "none";
     uint64_t read_bytes_rate = std::numeric_limits<uint64_t>::max();
@@ -5044,7 +5042,7 @@ network_stack_registry::create(sstring name, options opts) {
 
 boost::program_options::options_description
 reactor::get_options_description(reactor_config cfg) {
-    register_network_stacks();
+    smp::register_network_stacks();
     namespace bpo = boost::program_options;
     bpo::options_description opts("Core options");
     auto net_stack_names = network_stack_registry::list();

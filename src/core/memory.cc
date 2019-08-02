@@ -1356,9 +1356,6 @@ void configure(std::vector<resource::memory> m, bool mbind, bool hugepages) {
 #endif
         pos += x.bytes;
     }
-    if (hugepages) {
-        cpu_mem.init_virt_to_phys_map();
-    }
 }
 
 statistics stats() {
