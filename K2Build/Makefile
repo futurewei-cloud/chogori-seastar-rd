@@ -1,4 +1,4 @@
-include DFV_K2_BuildDeps/DockerMake.base
+include dfv_k2_build_deps/DockerMake.base
 
 package_version=$(shell git describe --tags `git rev-list --tags --max-count=1`)
 
@@ -34,11 +34,11 @@ clean:
 
 package_deb: install $(wildcard ../libseastar-k2_*.changes) $(wildcard ../libseastar-k2_*.deb)
 	@echo ">>> Packaging deb"
-	@cd ../ && fpm $(DEPEND_FLAGS) -s dir -t deb --deb-generate-changes -n libseastar-k2 -f -m k2 -a amd64 -v $(package_version) --deb-dist stable --description "Seastar k2 package http://rnd-github-usa-g.huawei.com/SeattleCloudBU/DFV_K2_SeaStar/" -C $(BUILD_DIR)/install
+	@cd ../ && fpm $(DEPEND_FLAGS) -s dir -t deb --deb-generate-changes -n libseastar-k2 -f -m k2 -a amd64 -v $(package_version) --deb-dist stable --description "Seastar k2 package https://gitlab.futurewei.com/k2/dfv_k2_seastar" -C $(BUILD_DIR)/install
 
 package_rpm: install $(wildcard ../libseastar-k2*.rpm)
 	@echo ">>> Packaging rpm"
-	@cd ../ && fpm -s dir -t rpm -n libseastar-k2 -f -m k2 -a amd64 -v $(package_version) --rpm-dist stable --description "Seastar k2 package http://rnd-github-usa-g.huawei.com/SeattleCloudBU/DFV_K2_SeaStar/" -C $(BUILD_DIR)/install
+	@cd ../ && fpm -s dir -t rpm -n libseastar-k2 -f -m k2 -a amd64 -v $(package_version) --rpm-dist stable --description "Seastar k2 package https://gitlab.futurewei.com/k2/dfv_k2_seastar" -C $(BUILD_DIR)/install
 
 package_push_deb: package_deb
 	@$(eval DEB_NAME := $(wildcard ../libseastar-k2_*.deb))
