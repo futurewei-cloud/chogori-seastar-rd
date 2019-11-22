@@ -45,6 +45,7 @@ namespace rdma {
 
 class RDMAStack;
 class RDMAListener;
+typedef temporary_buffer<char> Buffer;
 
 // Opens the RDMA device context, which is shared by all cores/RDMAStacks. The verbs API
 // is thread safe so sharing it is ok. Should only be called once at program start
@@ -71,10 +72,10 @@ struct SendWRData {
 };
 
 struct UDSend {
-    temporary_buffer<uint8_t> buffer;
+    Buffer buffer;
     struct ibv_ah* AH;
     uint32_t destQP;
-    UDSend (temporary_buffer<uint8_t>&& buf, struct ibv_ah* ah, uint32_t qp) :
+    UDSend (Buffer&& buf, struct ibv_ah* ah, uint32_t qp) :
         buffer(std::move(buf)), AH(ah), destQP(qp) {}
     UDSend() = delete;
 };
@@ -103,8 +104,8 @@ class RDMAConnectionError : std::exception {};
 
 class RDMAConnection : public weakly_referencable<RDMAConnection> {
 public:
-    future<temporary_buffer<uint8_t>> recv();
-    void send(std::vector<temporary_buffer<uint8_t>>&& buf);
+    future<Buffer> recv();
+    void send(std::vector<Buffer>&& buf);
 
     RDMAConnection(RDMAStack* stack, EndPoint remote) :
         stack(stack), remote(remote) {}
@@ -130,7 +131,7 @@ public:
 private:
     bool isReady = false;
     bool errorState = false;
-    std::deque<temporary_buffer<uint8_t>> recvQueue;
+    std::deque<Buffer> recvQueue;
 
     // Messages below this size will be copied into packed RDMA sends
     // if possible
@@ -138,13 +139,13 @@ private:
     // The number of bytes allocated but not used in the last temporary_buffer
     // of the sendQueue. Used to pack new messages into fewer send requests
     size_t sendQueueTailBytesLeft = 0;
-    std::deque<temporary_buffer<uint8_t>> sendQueue;
+    std::deque<Buffer> sendQueue;
 
     SendWRData sendWRs;
-    std::array<temporary_buffer<uint8_t>, SendWRData::maxWR> outstandingBuffers;
+    std::array<Buffer, SendWRData::maxWR> outstandingBuffers;
     template <class VecType>
     void processSends(VecType& queue);
-    void incomingMessage(unsigned char* data, uint32_t size);
+    void incomingMessage(char* data, uint32_t size);
     void sendCloseSignal();
 
     struct ibv_qp* QP = nullptr;
@@ -155,7 +156,7 @@ private:
     promise<> closePromise;
 
     bool recvPromiseActive = false;
-    promise<temporary_buffer<uint8_t>> recvPromise;
+    promise<Buffer> recvPromise;
 
     void makeQP();
     void makeHandshakeRequest();
@@ -206,18 +207,18 @@ private:
     static constexpr size_t UDQPRxSize = sizeof(UDMessage) + 40;
     RecvWRData UDQPRRs;
     SendWRData UDQPSRs;
-    std::array<temporary_buffer<uint8_t>, SendWRData::maxWR> UDOutstandingBuffers;
+    std::array<Buffer, SendWRData::maxWR> UDOutstandingBuffers;
     std::deque<UDSend> UDSendQueue;
 
-    int sendUDQPMessage(temporary_buffer<uint8_t> buffer, const union ibv_gid& GID, uint32_t destQP);
-    int trySendUDQPMessage(const temporary_buffer<uint8_t>& buffer, struct ibv_ah* AH, uint32_t destQP);
+    int sendUDQPMessage(Buffer buffer, const union ibv_gid& GID, uint32_t destQP);
+    int trySendUDQPMessage(const Buffer& buffer, struct ibv_ah* AH, uint32_t destQP);
     void processUDMessage(UDMessage*, EndPoint);
     void sendHandshakeResponse(const EndPoint& endpoint, uint32_t QPNum, uint32_t requestId);
     uint32_t sendHandshakeRequest(const EndPoint& endpoint, uint32_t QPNum);
     int handshakeId = 0;
     bool processUDSendQueue();
     bool processUDCQ();
-    static void processCompletedSRs(std::array<temporary_buffer<uint8_t>, SendWRData::maxWR>& buffers, SendWRData& WRData, uint64_t signaledID);
+    static void processCompletedSRs(std::array<Buffer, SendWRData::maxWR>& buffers, SendWRData& WRData, uint64_t signaledID);
     static constexpr int pollBatchSize = 16;
 
     static void fillAHAttr(struct ibv_ah_attr& AHAttr, const union ibv_gid& GID);

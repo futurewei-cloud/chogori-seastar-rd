@@ -73,7 +73,7 @@ void RDMAConnection::makeQP() {
     memset(&attr, 0, sizeof(ibv_qp_attr));
     attr.qp_state = IBV_QPS_INIT;
     attr.port_num = 1;
-    if (int err = ibv_modify_qp(QP, &attr, IBV_QP_STATE | IBV_QP_PKEY_INDEX | 
+    if (int err = ibv_modify_qp(QP, &attr, IBV_QP_STATE | IBV_QP_PKEY_INDEX |
                                            IBV_QP_PORT | IBV_QP_ACCESS_FLAGS)) {
         K2ERROR("failed to transition RC QP into init state: " << strerror(err));
         shutdownConnection();
@@ -133,10 +133,10 @@ void RDMAConnection::completeHandshake(uint32_t remoteQP) {
     struct ibv_ah_attr AHAttr;
     RDMAStack::fillAHAttr(AHAttr, remote.GID);
 
-    // The timeout, rnr_retry, and min_rnr_timer values of ibv_qp_attr 
+    // The timeout, rnr_retry, and min_rnr_timer values of ibv_qp_attr
     // do not have specific units,
     // e.g. the value assigned to timeout is an index into a lookup table
-    // of exponentially increasing values. See the ibv_modify_qp documentation 
+    // of exponentially increasing values. See the ibv_modify_qp documentation
     // for more info
     // TODO implement an exponential backoff timeout/retry strategy in software
 
@@ -193,12 +193,12 @@ void RDMAConnection::completeHandshake(uint32_t remoteQP) {
     isReady = true;
 
     size_t beforeSize = sendQueue.size();
-    processSends<std::deque<temporary_buffer<uint8_t>>>(sendQueue);
+    processSends<std::deque<Buffer>>(sendQueue);
     stack->sendQueueSize -= beforeSize - sendQueue.size();
 }
 
 
-// This method sends a zero-byte message to the destination, which 
+// This method sends a zero-byte message to the destination, which
 // indicates a graceful close. It also makes the send signaled so that
 // we can know when the send queue is flushed
 void RDMAConnection::sendCloseSignal() {
@@ -254,7 +254,7 @@ void RDMAConnection::processSends(VecType& queue) {
     struct ibv_send_wr* firstSR = &(sendWRs.SendRequests[idx]);
 
     for(int i=0; i < toProcess; ++i, idx = (baseIdx + i) % SendWRData::maxWR) {
-        temporary_buffer<uint8_t>& sendData = queue[i];
+        Buffer& sendData = queue[i];
         if (sendQueueTailBytesLeft && std::addressof(sendData) == std::addressof(sendQueue.back())) {
             sendData.trim(RDMAStack::RCDataSize - sendQueueTailBytesLeft);
             sendQueueTailBytesLeft = 0;
@@ -298,9 +298,9 @@ void RDMAConnection::processSends(VecType& queue) {
     return;
 }
 
-future<temporary_buffer<uint8_t>> RDMAConnection::recv() {
+future<Buffer> RDMAConnection::recv() {
     if (errorState) {
-        return make_exception_future<temporary_buffer<uint8_t>>(RDMAConnectionError());
+        return make_exception_future<Buffer>(RDMAConnectionError());
     }
     if (recvPromiseActive) {
         K2ASSERT(false, "recv() called with promise already active");
@@ -308,19 +308,19 @@ future<temporary_buffer<uint8_t>> RDMAConnection::recv() {
     }
 
     if (recvQueue.size()) {
-        auto recv_future = make_ready_future<temporary_buffer<uint8_t>>(std::move(recvQueue.front()));
+        auto recv_future = make_ready_future<Buffer>(std::move(recvQueue.front()));
         recvQueue.pop_front();
         return recv_future;
     }
 
-    recvPromise = promise<temporary_buffer<uint8_t>>();
+    recvPromise = promise<Buffer>();
     recvPromiseActive = true;
     return recvPromise.get_future();
 }
 
-void RDMAConnection::incomingMessage(unsigned char* data, uint32_t size) {
+void RDMAConnection::incomingMessage(char* data, uint32_t size) {
     K2DEBUG("RDMAConn " << QP->qp_num << " got message of size: " << size);
-    temporary_buffer<uint8_t> buf(data, size, make_free_deleter(data));
+    Buffer buf(data, size, make_free_deleter(data));
     if (recvPromiseActive) {
         recvPromiseActive = false;
         recvPromise.set_value(std::move(buf));
@@ -334,7 +334,7 @@ void RDMAConnection::incomingMessage(unsigned char* data, uint32_t size) {
     }
 }
 
-void RDMAConnection::send(std::vector<temporary_buffer<uint8_t>>&& buf) {
+void RDMAConnection::send(std::vector<Buffer>&& buf) {
     if (!isReady || sendQueue.size()) {
         size_t beforeSize = sendQueue.size();
 
@@ -367,7 +367,7 @@ void RDMAConnection::send(std::vector<temporary_buffer<uint8_t>>&& buf) {
         return;
     }
 
-    processSends<std::vector<temporary_buffer<uint8_t>>>(buf);
+    processSends<std::vector<Buffer>>(buf);
     if (buf.size()) {
         stack->sendQueueSize += buf.size();
         sendQueue.insert(sendQueue.end(), std::make_move_iterator(buf.begin()),
@@ -390,7 +390,7 @@ void RDMAConnection::shutdownConnection() {
     // TODO slow core
     if (QP) {
         // Transitioning the QP into the Error state will flush
-        // any outstanding WRs, possibly with errors. Is needed to 
+        // any outstanding WRs, possibly with errors. Is needed to
         // maintain consistency in the SRQ
         struct ibv_qp_attr attr;
         memset(&attr, 0, sizeof(ibv_qp_attr));
@@ -498,7 +498,7 @@ RDMAStack::~RDMAStack() {
 }
 
 void RDMAStack::sendHandshakeResponse(const EndPoint& endpoint, uint32_t QPNum, uint32_t id) {
-    temporary_buffer<uint8_t> response(sizeof(UDMessage));
+    Buffer response(sizeof(UDMessage));
     UDMessage* message = (UDMessage*)response.get();
     message->op = UDOps::HandshakeResponse;
     message->QPNum = QPNum;
@@ -507,7 +507,7 @@ void RDMAStack::sendHandshakeResponse(const EndPoint& endpoint, uint32_t QPNum, 
 }
 
 uint32_t RDMAStack::sendHandshakeRequest(const EndPoint& endpoint, uint32_t QPNum) {
-    temporary_buffer<uint8_t> response(sizeof(UDMessage));
+    Buffer response(sizeof(UDMessage));
     UDMessage* message = (UDMessage*)response.get();
     message->op = UDOps::HandshakeRequest;
     message->QPNum = QPNum;
@@ -528,7 +528,7 @@ struct ibv_ah* RDMAStack::makeAH(const union ibv_gid& GID) {
     return AH;
 }
 
-int RDMAStack::sendUDQPMessage(temporary_buffer<uint8_t> buffer, const union ibv_gid& destGID, uint32_t destQP) {
+int RDMAStack::sendUDQPMessage(Buffer buffer, const union ibv_gid& destGID, uint32_t destQP) {
     K2ASSERT(buffer.size() + UDDataOffset <= UDQPRxSize, "UD Message too large");
 
     auto AHIt = AHLookup.find(destGID);
@@ -550,7 +550,7 @@ int RDMAStack::sendUDQPMessage(temporary_buffer<uint8_t> buffer, const union ibv
     return 0;
 }
 
-int RDMAStack::trySendUDQPMessage(const temporary_buffer<uint8_t>& buffer, struct ibv_ah* AH, uint32_t destQP) {
+int RDMAStack::trySendUDQPMessage(const Buffer& buffer, struct ibv_ah* AH, uint32_t destQP) {
     if (UDQPSRs.postedCount == SendWRData::maxWR) {
         return -1;
     }
@@ -633,11 +633,11 @@ bool RDMAStack::processUDSendQueue() {
     return true;
 }
 
-void RDMAStack::processCompletedSRs(std::array<temporary_buffer<uint8_t>, SendWRData::maxWR>& buffers, SendWRData& WRData, uint64_t signaledID) {
+void RDMAStack::processCompletedSRs(std::array<Buffer, SendWRData::maxWR>& buffers, SendWRData& WRData, uint64_t signaledID) {
     uint32_t freed=0;
     K2ASSERT(WRData.postedIdx <= signaledID, "Send assumptions bad");
     for (int i=WRData.postedIdx; i<=(int)signaledID; ++i, ++freed) {
-        buffers[i] = temporary_buffer<uint8_t>();
+        buffers[i] = Buffer();
     }
 
     WRData.postedIdx = (WRData.postedIdx + freed) % SendWRData::maxWR;
@@ -726,7 +726,7 @@ bool RDMAStack::processRCCQ() {
             foundConn = false;
         }
 
-        // WC op code is not valid if there was an error, so we use the 
+        // WC op code is not valid if there was an error, so we use the
         // wr_id to differentiate between sends and receives
         bool isRecv = WCs[i].wr_id < RecvWRData::maxWR;
 
@@ -736,7 +736,7 @@ bool RDMAStack::processRCCQ() {
                 continue;
             }
 
-            processCompletedSRs(connIt->second->outstandingBuffers, 
+            processCompletedSRs(connIt->second->outstandingBuffers,
                                 connIt->second->sendWRs, WCs[i].wr_id - RecvWRData::maxWR);
             if (WCs[i].status != IBV_WC_SUCCESS) {
                 K2WARN("error on send wc: " << ibv_wc_status_str(WCs[i].status));
@@ -757,9 +757,9 @@ bool RDMAStack::processRCCQ() {
                 if (foundConn) {
                     connIt->second->shutdownConnection();
                 }
-                free((unsigned char*)RCQPRRs.Segments[idx].addr);
+                free((char*)RCQPRRs.Segments[idx].addr);
             } else if (foundConn) {
-                unsigned char* data = (unsigned char*)RCQPRRs.Segments[idx].addr;
+                char* data = (char*)RCQPRRs.Segments[idx].addr;
                 uint32_t size = WCs[i].byte_len;
                 connIt->second->incomingMessage(data, size);
             }
@@ -849,29 +849,29 @@ void RDMAStack::registerMetrics() {
     namespace sm = seastar::metrics;
 
     metricGroup.add_group("rdma_stack", {
-        sm::make_counter("send_count", totalSend, 
+        sm::make_counter("send_count", totalSend,
             sm::description("Total number of messages sent")),
-        sm::make_counter("recv_count", totalRecv, 
+        sm::make_counter("recv_count", totalRecv,
             sm::description("Total number of messages received")),
-        sm::make_gauge("send_queue_size", [this]{ 
+        sm::make_gauge("send_queue_size", [this]{
                 if (!sendQueueCount) {
                     return 0.0;
                 }
                 double avg = sendQueueSum / (double)sendQueueCount;
                 sendQueueSum = sendQueueCount = 0;
                 return avg;
-            }, 
+            },
             sm::description("Average size of the send queue")),
-        sm::make_gauge("send_batch_size", [this]{ 
+        sm::make_gauge("send_batch_size", [this]{
                 if (!sendBatchCount) {
                     return 0.0;
                 }
                 double avg = sendBatchSum / (double)sendBatchCount;
                 sendBatchSum = sendBatchCount = 0;
                 return avg;
-            }, 
+            },
             sm::description("Average size of the send batches")),
-        sm::make_gauge("recv_batch_size", [this]{ 
+        sm::make_gauge("recv_batch_size", [this]{
                 if (!recvBatchCount) {
                     return 0.0;
                 }
@@ -916,7 +916,7 @@ std::unique_ptr<RDMAStack> RDMAStack::makeUDQP(std::unique_ptr<RDMAStack> stack)
     memset(&attr, 0, sizeof(ibv_qp_attr));
     attr.qp_state = IBV_QPS_INIT;
     attr.port_num = 1;
-    if (int err = ibv_modify_qp(stack->UDQP, &attr, 
+    if (int err = ibv_modify_qp(stack->UDQP, &attr,
                                IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_QKEY)) {
         K2ERROR("Failed to transition UD QP into init state: " << strerror(err));
         return nullptr;
