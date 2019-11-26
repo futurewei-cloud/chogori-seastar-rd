@@ -42,6 +42,8 @@
 #include <vector>
 #include <boost/intrusive/list.hpp>
 #include <seastar/http/routes.hh>
+#include <seastar/net/tls.hh>
+#include <seastar/core/shared_ptr.hh>
 
 namespace seastar {
 
@@ -217,7 +219,7 @@ public:
 class http_server_tester;
 
 class http_server {
-    std::vector<server_socket> _listeners;
+    std::vector<api_v2::server_socket> _listeners;
     http_stats _stats;
     uint64_t _total_connections = 0;
     uint64_t _current_connections = 0;
@@ -225,6 +227,7 @@ class http_server {
     uint64_t _connections_being_accepted = 0;
     uint64_t _read_errors = 0;
     uint64_t _respond_errors = 0;
+    shared_ptr<seastar::tls::server_credentials> _credentials;
     sstring _date = http_date();
     timer<> _date_format_timer { [this] {_date = http_date();} };
     bool _stopping = false;
@@ -242,8 +245,42 @@ public:
     explicit http_server(const sstring& name) : _stats(*this, name) {
         _date_format_timer.arm_periodic(1s);
     }
+    /*!
+     * \brief set tls credentials for the server
+     * Setting the tls credentials will set the http-server to work in https mode.
+     *
+     * To use the https, create server credentials and pass it to the server before it starts.
+     *
+     * Use case example using seastar threads for clarity:
+
+        distributed<http_server> server; // typical server
+
+        seastar::shared_ptr<seastar::tls::credentials_builder> creds = seastar::make_shared<seastar::tls::credentials_builder>();
+        sstring ms_cert = "MyCertificate.crt";
+        sstring ms_key = "MyKey.key";
+
+        creds->set_dh_level(seastar::tls::dh_params::level::MEDIUM);
+
+        creds->set_x509_key_file(ms_cert, ms_key, seastar::tls::x509_crt_format::PEM).get();
+        creds->set_system_trust().get();
+
+
+        server.invoke_on_all([creds](http_server& server) {
+            server.set_tls_credentials(creds->build_server_credentials());
+            return make_ready_future<>();
+        }).get();
+     *
+     */
+    void set_tls_credentials(shared_ptr<seastar::tls::server_credentials> credentials) {
+        _credentials = credentials;
+    }
+
     future<> listen(socket_address addr, listen_options lo) {
-        _listeners.push_back(engine().listen(addr, lo));
+        if (_credentials) {
+            _listeners.push_back(seastar::tls::listen(_credentials, addr, lo));
+        } else {
+            _listeners.push_back(engine().listen(addr, lo));
+        }
         _stopped = when_all(std::move(_stopped), do_accepts(_listeners.size() - 1)).discard_result();
         return make_ready_future<>();
     }
@@ -267,15 +304,15 @@ public:
     future<> do_accepts(int which) {
         ++_connections_being_accepted;
         return _listeners[which].accept().then_wrapped(
-                [this, which] (future<connected_socket, socket_address> f_cs_sa) mutable {
+                [this, which] (future<accept_result> f_ar) mutable {
             --_connections_being_accepted;
-            if (_stopping || f_cs_sa.failed()) {
-                f_cs_sa.ignore_ready_future();
+            if (_stopping || f_ar.failed()) {
+                f_ar.ignore_ready_future();
                 maybe_idle();
                 return;
             }
-            auto cs_sa = f_cs_sa.get();
-            auto conn = new connection(*this, std::get<0>(std::move(cs_sa)), std::get<1>(std::move(cs_sa)));
+            auto ar = f_ar.get0();
+            auto conn = new connection(*this, std::move(ar.connection), std::move(ar.remote_address));
             // FIXME: future is discarded
             (void)conn->process().then_wrapped([conn] (auto&& f) {
                 delete conn;
@@ -327,7 +364,7 @@ private:
 
 class http_server_tester {
 public:
-    static std::vector<server_socket>& listeners(http_server& server) {
+    static std::vector<api_v2::server_socket>& listeners(http_server& server) {
         return server._listeners;
     }
 };

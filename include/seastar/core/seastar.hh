@@ -45,6 +45,7 @@
 #include <seastar/core/future.hh>
 #include <seastar/core/file-types.hh>
 #include <seastar/util/bool_class.hh>
+#include "./internal/api-level.hh"
 
 namespace seastar {
 
@@ -53,7 +54,14 @@ template <class CharType> class input_stream;
 template <class CharType> class output_stream;
 
 // reactor.hh
-class server_socket;
+SEASTAR_INCLUDE_API_V2 namespace api_v2 { class server_socket; }
+
+#if SEASTAR_API_LEVEL <= 1
+
+SEASTAR_INCLUDE_API_V1 namespace api_v1 { class server_socket; }
+
+#endif
+
 class connected_socket;
 class socket_address;
 struct listen_options;
@@ -246,9 +254,9 @@ future<> recursive_touch_directory(sstring name, file_permissions permissions = 
 future<> sync_directory(sstring name);
 
 
-/// Removes (unlinks) a file.
+/// Removes (unlinks) a file or an empty directory
 ///
-/// \param name name of the file to remove
+/// \param name name of the file or the directory to remove
 ///
 /// \note
 /// The removal is not guaranteed to be stable on disk, unless the

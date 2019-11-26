@@ -92,6 +92,7 @@ struct resource_limits {
 struct client_options {
     compat::optional<net::tcp_keepalive_params> keepalive;
     bool tcp_nodelay = true;
+    bool reuseaddr = false;
     compressor::factory* compressor_factory = nullptr;
     bool send_timeout_data = true;
     connection_id stream_parent = invalid_connection_id;
@@ -373,9 +374,9 @@ private:
 private:
     future<> negotiate_protocol(input_stream<char>& in);
     void negotiate(feature_map server_features);
-    future<int64_t, compat::optional<rcv_buf>>
+    future<std::tuple<int64_t, compat::optional<rcv_buf>>>
     read_response_frame(input_stream<char>& in);
-    future<int64_t, compat::optional<rcv_buf>>
+    future<std::tuple<int64_t, compat::optional<rcv_buf>>>
     read_response_frame_compressed(input_stream<char>& in);
     void send_loop() {
         if (is_stream()) {
@@ -464,7 +465,7 @@ public:
         compat::optional<isolation_config> _isolation_config;
     private:
         future<> negotiate_protocol(input_stream<char>& in);
-        future<compat::optional<uint64_t>, uint64_t, int64_t, compat::optional<rcv_buf>>
+        future<std::tuple<compat::optional<uint64_t>, uint64_t, int64_t, compat::optional<rcv_buf>>>
         read_request_frame_compressed(input_stream<char>& in);
         future<feature_map> negotiate(feature_map requested);
         void send_loop() {
@@ -514,7 +515,7 @@ public:
     };
 private:
     protocol_base* _proto;
-    server_socket _ss;
+    api_v2::server_socket _ss;
     resource_limits _limits;
     rpc_semaphore _resources_available;
     std::unordered_map<connection_id, shared_ptr<connection>> _conns;

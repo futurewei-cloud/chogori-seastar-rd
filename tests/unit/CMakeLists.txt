@@ -306,6 +306,9 @@ seastar_add_test (httpd
 seastar_add_test (ipv6
   SOURCES ipv6_test.cc)
 
+seastar_add_test (network_interface
+  SOURCES network_interface_test.cc)
+
 seastar_add_test (json_formatter
   SOURCES json_formatter_test.cc)
 
@@ -377,6 +380,9 @@ seastar_add_test (stall_detector
 seastar_add_test (thread
   SOURCES thread_test.cc)
 
+seastar_add_test (scheduling_group
+  SOURCES scheduling_group_test.cc)
+
 seastar_add_app_test (thread_context_switch
   SOURCES thread_context_switch_test.cc)
 
@@ -420,6 +426,9 @@ add_custom_command (
 seastar_add_test (tuple_utils
   KIND BOOST
   SOURCES tuple_utils_test.cc)
+
+seastar_add_test (unixdomain
+  SOURCES unix_domain_test.cc)
 
 seastar_add_test (unwind
   KIND BOOST

@@ -532,7 +532,8 @@ namespace rpc {
 
   struct response_frame {
       using opt_buf_type = compat::optional<rcv_buf>;
-      using return_type = future<int64_t, opt_buf_type>;
+      using header_and_buffer_type = std::tuple<int64_t, opt_buf_type>;
+      using return_type = future<header_and_buffer_type>;
       using header_type = std::tuple<int64_t, uint32_t>;
       static size_t header_size() {
           return 12;
@@ -541,7 +542,7 @@ namespace rpc {
           return "client";
       }
       static auto empty_value() {
-          return make_ready_future<int64_t, opt_buf_type>(0, compat::nullopt);
+          return make_ready_future<header_and_buffer_type>(header_and_buffer_type(0, compat::nullopt));
       }
       static header_type decode_header(const char* ptr) {
           auto msgid = read_le<int64_t>(ptr);
@@ -552,17 +553,17 @@ namespace rpc {
           return std::get<1>(t);
       }
       static auto make_value(const header_type& t, rcv_buf data) {
-          return make_ready_future<int64_t, opt_buf_type>(std::get<0>(t), std::move(data));
+          return make_ready_future<header_and_buffer_type>(header_and_buffer_type(std::get<0>(t), std::move(data)));
       }
   };
 
 
-  future<int64_t, compat::optional<rcv_buf>>
+  future<response_frame::header_and_buffer_type>
   client::read_response_frame(input_stream<char>& in) {
       return read_frame<response_frame>(_server_addr, in);
   }
 
-  future<int64_t, compat::optional<rcv_buf>>
+  future<response_frame::header_and_buffer_type>
   client::read_response_frame_compressed(input_stream<char>& in) {
       return read_frame_compressed<response_frame>(_server_addr, _compressor, in);
   }
@@ -620,7 +621,11 @@ namespace rpc {
 
   client::client(const logger& l, void* s, client_options ops, socket socket, const socket_address& addr, const socket_address& local)
   : rpc::connection(l, s), _socket(std::move(socket)), _server_addr(addr), _options(ops) {
-      _socket.connect(addr, local).then([this, ops = std::move(ops)] (connected_socket fd) {
+       _socket.set_reuseaddr(ops.reuseaddr);
+      // Run client in the background.
+      // Communicate result via _stopped.
+      // The caller has to call client::stop() to synchronize.
+      (void)_socket.connect(addr, local).then([this, ops = std::move(ops)] (connected_socket fd) {
           fd.set_nodelay(ops.tcp_nodelay);
           if (ops.keepalive) {
               fd.set_keepalive(true);
@@ -652,7 +657,9 @@ namespace rpc {
                   if (is_stream()) {
                       return handle_stream_frame();
                   }
-                  return read_response_frame_compressed(_read_buf).then([this] (int64_t msg_id, compat::optional<rcv_buf> data) {
+                  return read_response_frame_compressed(_read_buf).then([this] (std::tuple<int64_t, compat::optional<rcv_buf>> msg_id_and_data) {
+                      auto& msg_id = std::get<0>(msg_id_and_data);
+                      auto& data = std::get<1>(msg_id_and_data);
                       auto it = _outstanding.find(std::abs(msg_id));
                       if (!data) {
                           _error = true;
@@ -794,7 +801,8 @@ namespace rpc {
 
   struct request_frame {
       using opt_buf_type = compat::optional<rcv_buf>;
-      using return_type = future<compat::optional<uint64_t>, uint64_t, int64_t, opt_buf_type>;
+      using header_and_buffer_type = std::tuple<compat::optional<uint64_t>, uint64_t, int64_t, opt_buf_type>;
+      using return_type = future<header_and_buffer_type>;
       using header_type = std::tuple<compat::optional<uint64_t>, uint64_t, int64_t, uint32_t>;
       static size_t header_size() {
           return 20;
@@ -803,7 +811,7 @@ namespace rpc {
           return "server";
       }
       static auto empty_value() {
-          return make_ready_future<compat::optional<uint64_t>, uint64_t, int64_t, opt_buf_type>(compat::nullopt, uint64_t(0), 0, compat::nullopt);
+          return make_ready_future<header_and_buffer_type>(header_and_buffer_type(compat::nullopt, uint64_t(0), 0, compat::nullopt));
       }
       static header_type decode_header(const char* ptr) {
           auto type = read_le<uint64_t>(ptr);
@@ -815,7 +823,7 @@ namespace rpc {
           return std::get<3>(t);
       }
       static auto make_value(const header_type& t, rcv_buf data) {
-          return make_ready_future<compat::optional<uint64_t>, uint64_t, int64_t, opt_buf_type>(std::get<0>(t), std::get<1>(t), std::get<2>(t), std::move(data));
+          return make_ready_future<header_and_buffer_type>(header_and_buffer_type(std::get<0>(t), std::get<1>(t), std::get<2>(t), std::move(data)));
       }
   };
 
@@ -831,7 +839,7 @@ namespace rpc {
       }
   };
 
-  future<compat::optional<uint64_t>, uint64_t, int64_t, compat::optional<rcv_buf>>
+  future<request_frame::header_and_buffer_type>
   server::connection::read_request_frame_compressed(input_stream<char>& in) {
       if (_timeout_negotiated) {
           return read_frame_compressed<request_frame_with_timeout>(_info.addr, _compressor, in);
@@ -859,7 +867,9 @@ future<> server::connection::send_unknown_verb_reply(compat::optional<rpc_clock_
         write_le<uint32_t>(p + 4, uint32_t(8));
         write_le<uint64_t>(p + 8, type);
         try {
-            with_gate(_server._reply_gate, [this, timeout, msg_id, data = std::move(data), permit = std::move(permit)] () mutable {
+            // Send asynchronously.
+            // This is safe since connection::stop() will wait for background work.
+            (void)with_gate(_server._reply_gate, [this, timeout, msg_id, data = std::move(data), permit = std::move(permit)] () mutable {
                 // workaround for https://gcc.gnu.org/bugzilla/show_bug.cgi?id=83268
                 auto c = shared_from_this();
                 return respond(-msg_id, std::move(data), timeout).then([c = std::move(c), permit = std::move(permit)] {});
@@ -877,14 +887,18 @@ future<> server::connection::send_unknown_verb_reply(compat::optional<rpc_clock_
               if (is_stream()) {
                   return handle_stream_frame();
               }
-              return read_request_frame_compressed(_read_buf).then([this] (compat::optional<uint64_t> expire, uint64_t type, int64_t msg_id, compat::optional<rcv_buf> data) {
+              return read_request_frame_compressed(_read_buf).then([this] (request_frame::header_and_buffer_type header_and_buffer) {
+                  auto& expire = std::get<0>(header_and_buffer);
+                  auto& type = std::get<1>(header_and_buffer);
+                  auto& msg_id = std::get<2>(header_and_buffer);
+                  auto& data = std::get<3>(header_and_buffer);
                   if (!data) {
                       _error = true;
                       return make_ready_future<>();
                   } else {
                       compat::optional<rpc_clock_type::time_point> timeout;
                       if (expire && *expire) {
-                          timeout = rpc_clock_type::now() + std::chrono::milliseconds(*expire);
+                          timeout = relative_timeout_to_absolute(std::chrono::milliseconds(*expire));
                       }
                       auto h = _server._proto->get_handler(type);
                       // If the new method of per-connection scheduling group was used, honor it.
@@ -964,6 +978,9 @@ future<> server::connection::send_unknown_verb_reply(compat::optional<rpc_clock_
           : _proto(proto), _ss(std::move(ss)), _limits(limits), _resources_available(limits.max_memory), _options(opts)
   {
       if (_options.streaming_domain) {
+          if (_servers.find(*_options.streaming_domain) != _servers.end()) {
+              throw std::runtime_error(format("An RPC server with the streaming domain {} is already exist", *_options.streaming_domain));
+          }
           _servers[*_options.streaming_domain] = this;
       }
       accept();
@@ -974,8 +991,13 @@ future<> server::connection::send_unknown_verb_reply(compat::optional<rpc_clock_
   {}
 
   void server::accept() {
-      keep_doing([this] () mutable {
-          return _ss.accept().then([this] (connected_socket fd, socket_address addr) mutable {
+      // Run asynchronously in background.
+      // Communicate result via __ss_stopped.
+      // The caller has to call server::stop() to synchronize.
+      (void)keep_doing([this] () mutable {
+          return _ss.accept().then([this] (accept_result ar) mutable {
+              auto fd = std::move(ar.connection);
+              auto addr = std::move(ar.remote_address);
               fd.set_nodelay(_options.tcp_nodelay);
               connection_id id = _options.streaming_domain ?
                       connection_id::make_id(_next_client_id++, uint16_t(engine().cpu_id())) :
@@ -983,7 +1005,8 @@ future<> server::connection::send_unknown_verb_reply(compat::optional<rpc_clock_
               auto conn = _proto->make_server_connection(*this, std::move(fd), std::move(addr), id);
               auto r = _conns.emplace(id, conn);
               assert(r.second);
-              conn->process();
+              // Process asynchronously in background.
+              (void)conn->process();
           });
       }).then_wrapped([this] (future<>&& f){
           try {

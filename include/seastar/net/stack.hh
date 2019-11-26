@@ -23,6 +23,7 @@
 #include <chrono>
 #include <seastar/net/api.hh>
 #include <seastar/core/memory.hh>
+#include "../core/internal/api-level.hh"
 
 namespace seastar {
 
@@ -48,8 +49,27 @@ class socket_impl {
 public:
     virtual ~socket_impl() {}
     virtual future<connected_socket> connect(socket_address sa, socket_address local, transport proto = transport::TCP) = 0;
+    virtual void set_reuseaddr(bool reuseaddr) = 0;
+    virtual bool get_reuseaddr() const = 0;
     virtual void shutdown() = 0;
 };
+
+
+SEASTAR_INCLUDE_API_V2 namespace api_v2 {
+
+class server_socket_impl {
+public:
+    virtual ~server_socket_impl() {}
+    virtual future<accept_result> accept() = 0;
+    virtual void abort_accept() = 0;
+    virtual socket_address local_address() const = 0;
+};
+
+}
+
+#if SEASTAR_API_LEVEL <= 1
+
+SEASTAR_INCLUDE_API_V1 namespace api_v1 {
 
 class server_socket_impl {
 public:
@@ -58,6 +78,10 @@ public:
     virtual void abort_accept() = 0;
     virtual socket_address local_address() const = 0;
 };
+
+}
+
+#endif
 
 class udp_channel_impl {
 public:
@@ -70,6 +94,22 @@ public:
     virtual void shutdown_output() = 0;
     virtual bool is_closed() const = 0;
     virtual void close() = 0;
+};
+
+class network_interface_impl {
+public:
+    virtual uint32_t index() const = 0;
+    virtual uint32_t mtu() const = 0;
+
+    virtual const sstring& name() const = 0;
+    virtual const sstring& display_name() const = 0;
+    virtual const std::vector<net::inet_address>& addresses() const = 0;
+    virtual const std::vector<uint8_t> hardware_address() const = 0;
+
+    virtual bool is_loopback() const = 0;
+    virtual bool is_virtual() const = 0;
+    virtual bool is_up() const = 0;
+    virtual bool supports_ipv6() const = 0;
 };
 
 /// \endcond

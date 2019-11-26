@@ -225,7 +225,11 @@ public:
 
     virtual uint64_t get_pos() {
         if (_position >= _size_limit) {
-            throw invalid_position();
+            // Wrap around if reaching EOF. The write bandwidth is lower,
+            // and we also split the write bandwidth among shards, while we
+            // read only from shard 0, so shard 0's file may not be large
+            // enough to read from.
+            _position = 0;
         }
         auto pos = _position;
         _position += _buffer_size;
@@ -430,7 +434,7 @@ public:
     }
 
     future<> stop() {
-        return make_ready_future<>();
+        return _file.close();
     }
 };
 
@@ -629,11 +633,16 @@ int main(int ac, char** av) {
 
                 ::iotune_multi_shard_context iotune_tests(test_directory);
                 iotune_tests.start().get();
-                iotune_tests.create_data_file().get();
-
                 auto stop = defer([&iotune_tests] {
-                    iotune_tests.stop().get();
+                    try {
+                        iotune_tests.stop().get();
+                    } catch (...) {
+                        fmt::print("Error occurred during iotune context shutdown: {}", std::current_exception());
+                        abort();
+                    }
                 });
+
+                iotune_tests.create_data_file().get();
 
                 fmt::print("Starting Evaluation. This may take a while...\n");
                 fmt::print("Measuring sequential write bandwidth: ");

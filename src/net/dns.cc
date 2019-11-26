@@ -240,13 +240,9 @@ public:
         dns_log.debug("Query name {} ({})", name, family);
 
         if (!family) {
-            ::in_addr in;
-            ::in6_addr in6;
-            if (::inet_pton(AF_INET, name.c_str(), &in)) {
-                return make_ready_future<hostent>(hostent{ {name}, {net::inet_address(in)}});
-            }
-            if (::inet_pton(AF_INET6, name.c_str(), &in6)) {
-                return make_ready_future<hostent>(hostent{ {name}, {net::inet_address(in6)}});
+            auto res = inet_address::parse_numerical(name);
+            if (res) {
+                return make_ready_future<hostent>(hostent{ {name}, {*res}});
             }
         }
 
@@ -612,7 +608,8 @@ private:
                     dns_log.trace("Connection pending: {}", fd);
                     e.avail = 0;
                     use(fd);
-                    f.then_wrapped([me = shared_from_this(), &e, fd](future<connected_socket> f) {
+                    // FIXME: future is discarded
+                    (void)f.then_wrapped([me = shared_from_this(), &e, fd](future<connected_socket> f) {
                         try {
                             e.tcp.socket = f.get0();
                             dns_log.trace("Connection complete: {}", fd);
@@ -674,7 +671,8 @@ private:
                         dns_log.trace("Read {}: data unavailable", fd);
                         e.avail &= ~POLLIN;
                         use(fd);
-                        f.then_wrapped([me = shared_from_this(), &e, fd](future<temporary_buffer<char>> f) {
+                        // FIXME: future is discarded
+                        (void)f.then_wrapped([me = shared_from_this(), &e, fd](future<temporary_buffer<char>> f) {
                             try {
                                 auto buf = f.get0();
                                 dns_log.trace("Read {} -> {} bytes", fd, buf.size());
@@ -736,7 +734,8 @@ private:
                         e.avail &= ~POLLIN;
                         use(fd);
                         dns_log.trace("Read {}: data unavailable", fd);
-                        f.then_wrapped([me = shared_from_this(), &e, fd](future<net::udp_datagram> f) {
+                        // FIXME: future is discarded
+                        (void)f.then_wrapped([me = shared_from_this(), &e, fd](future<net::udp_datagram> f) {
                             try {
                                 auto d = f.get0();
                                 dns_log.trace("Read {} -> {} bytes", fd, d.get_data().len());
@@ -831,7 +830,8 @@ private:
                     dns_log.trace("Send {} unavailable.", fd);
                     e.avail &= ~POLLOUT;
                     use(fd);
-                    f.then_wrapped([me = shared_from_this(), &e, bytes, fd](future<> f) {
+                    // FIXME: future is discarded
+                    (void)f.then_wrapped([me = shared_from_this(), &e, bytes, fd](future<> f) {
                         try {
                             f.get();
                             dns_log.trace("Send {}. {} bytes sent.", fd, bytes);

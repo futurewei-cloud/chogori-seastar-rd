@@ -161,7 +161,7 @@ public:
         _rx->shutdown();
     }
     void shutdown_output() override {
-        smp::submit_to(_tx.get_owner_shard(), [this] {
+        (void)smp::submit_to(_tx.get_owner_shard(), [this] {
             // FIXME: who holds to _tx?
             _tx->shutdown();
         });
@@ -181,15 +181,15 @@ public:
     }
 };
 
-class loopback_server_socket_impl : public net::server_socket_impl {
+class loopback_server_socket_impl : public net::api_v2::server_socket_impl {
     lw_shared_ptr<queue<connected_socket>> _pending;
 public:
     explicit loopback_server_socket_impl(lw_shared_ptr<queue<connected_socket>> q)
             : _pending(std::move(q)) {
     }
-    future<connected_socket, socket_address> accept() override {
+    future<accept_result> accept() override {
         return _pending->pop_eventually().then([] (connected_socket&& cs) {
-            return make_ready_future<connected_socket, socket_address>(std::move(cs), socket_address());
+            return make_ready_future<accept_result>(accept_result{std::move(cs), socket_address()});
         });
     }
     void abort_accept() override {
@@ -254,10 +254,12 @@ public:
             return _factory.make_new_client_connection(_b1, std::move(b2));
         });
     }
+    virtual void set_reuseaddr(bool reuseaddr) override {}
+    virtual bool get_reuseaddr() const override { return false; };
 
     void shutdown() {
         _b1->shutdown();
-        smp::submit_to(_b2.get_owner_shard(), [b2 = std::move(_b2)] {
+        (void)smp::submit_to(_b2.get_owner_shard(), [b2 = std::move(_b2)] {
             b2->shutdown();
         });
     }

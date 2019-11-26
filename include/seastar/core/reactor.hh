@@ -54,6 +54,7 @@
 #include <boost/thread/barrier.hpp>
 #include <boost/container/static_vector.hpp>
 #include <set>
+#include <seastar/core/reactor_config.hh>
 #include <seastar/core/linux-aio.hh>
 #include <seastar/util/eclipse.hh>
 #include <seastar/core/future.hh>
@@ -78,7 +79,9 @@
 #include <seastar/core/manual_clock.hh>
 #include <seastar/core/metrics_registration.hh>
 #include <seastar/core/scheduling.hh>
+#include <seastar/core/smp.hh>
 #include "internal/pollable_fd.hh"
+#include "internal/poll.hh"
 
 #ifdef HAVE_OSV
 #include <osv/sched.hh>
@@ -93,25 +96,6 @@ extern "C" int _Unwind_RaiseException(struct _Unwind_Exception *h);
 namespace seastar {
 
 using shard_id = unsigned;
-
-/// Configuration structure for reactor
-///
-/// This structure provides configuration items for the reactor. It is typically
-/// provided by \ref app_template, not the user.
-struct reactor_config {
-    std::chrono::duration<double> task_quota{0.5e-3}; ///< default time between polls
-    /// \brief Handle SIGINT/SIGTERM by calling reactor::stop()
-    ///
-    /// When true, Seastar will set up signal handlers for SIGINT/SIGTERM that call
-    /// reactor::stop(). The reactor will then execute callbacks installed by
-    /// reactor::at_exit().
-    ///
-    /// When false, Seastar will not set up signal handlers for SIGINT/SIGTERM
-    /// automatically. The default behavior (terminate the program) will be kept.
-    /// You can adjust the behavior of SIGINT/SIGTERM by installing signal handlers
-    /// via reactor::handle_signal().
-    bool auto_handle_sigint_sigterm = true;  ///< automatically terminate on SIGINT/SIGTERM
-};
 
 namespace alien {
 class message_queue;
@@ -145,7 +129,7 @@ bool operator==(const ::sockaddr_in a, const ::sockaddr_in b);
 namespace seastar {
 
 void register_network_stack(sstring name, boost::program_options::options_description opts,
-    std::function<future<std::unique_ptr<network_stack>>(boost::program_options::variables_map opts)> create,
+    noncopyable_function<future<std::unique_ptr<network_stack>>(boost::program_options::variables_map opts)> create,
     bool make_default = false);
 
 class thread_pool;
@@ -153,207 +137,6 @@ class smp;
 namespace rdma {
 class RDMAStack;
 }
-
-class smp_service_group;
-struct smp_service_group_config;
-
-namespace internal {
-
-unsigned smp_service_group_id(smp_service_group ssg);
-
-}
-
-/// Returns the default smp_service_group. This smp_service_group
-/// does not impose any limits on concurrency in the target shard.
-/// This makes is deadlock-safe, but can consume unbounded resources,
-/// and should therefore only be used when initiator concurrency is
-/// very low (e.g. administrative tasks).
-smp_service_group default_smp_service_group();
-
-/// Creates an smp_service_group with the specified configuration.
-///
-/// The smp_service_group is global, and after this call completes,
-/// the returned value can be used on any shard.
-future<smp_service_group> create_smp_service_group(smp_service_group_config ssgc);
-
-/// Destroy an smp_service_group.
-///
-/// Frees all resources used by an smp_service_group. It must not
-/// be used again once this function is called.
-future<> destroy_smp_service_group(smp_service_group ssg);
-
-/// A resource controller for cross-shard calls.
-///
-/// An smp_service_group allows you to limit the concurrency of
-/// smp::submit_to() and similar calls. While it's easy to limit
-/// the caller's concurrency (for example, by using a semaphore),
-/// the concurrency at the remote end can be multiplied by a factor
-/// of smp::count-1, which can be large.
-///
-/// The class is called a service _group_ because it can be used
-/// to group similar calls that share resource usage characteristics,
-/// need not be isolated from each other, but do need to be isolated
-/// from other groups. Calls in a group should not nest; doing so
-/// can result in ABA deadlocks.
-///
-/// Nested submit_to() calls must form a directed acyclic graph
-/// when considering their smp_service_groups as nodes. For example,
-/// if a call using ssg1 then invokes another call using ssg2, the
-/// internal call may not call again via either ssg1 or ssg2, or it
-/// may form a cycle (and risking an ABBA deadlock). Create a
-/// new smp_service_group_instead.
-class smp_service_group {
-    unsigned _id;
-private:
-    explicit smp_service_group(unsigned id) : _id(id) {}
-
-    friend unsigned internal::smp_service_group_id(smp_service_group ssg);
-    friend smp_service_group default_smp_service_group();
-    friend future<smp_service_group> create_smp_service_group(smp_service_group_config ssgc);
-};
-
-inline
-smp_service_group default_smp_service_group() {
-    return smp_service_group(0);
-}
-
-inline
-unsigned
-internal::smp_service_group_id(smp_service_group ssg) {
-    return ssg._id;
-}
-
-
-/// Configuration for smp_service_group objects.
-///
-/// \see create_smp_service_group()
-struct smp_service_group_config {
-    /// The maximum number of non-local requests that execute on a shard concurrently
-    ///
-    /// Will be adjusted upwards to allow at least one request per non-local shard.
-    unsigned max_nonlocal_requests = 0;
-};
-
-
-class smp_message_queue {
-    static constexpr size_t queue_length = 128;
-    static constexpr size_t batch_size = 16;
-    static constexpr size_t prefetch_cnt = 2;
-    struct work_item;
-    struct lf_queue_remote {
-        reactor* remote;
-    };
-    using lf_queue_base = boost::lockfree::spsc_queue<work_item*,
-                            boost::lockfree::capacity<queue_length>>;
-    // use inheritence to control placement order
-    struct lf_queue : lf_queue_remote, lf_queue_base {
-        lf_queue(reactor* remote) : lf_queue_remote{remote} {}
-        void maybe_wakeup();
-        ~lf_queue();
-    };
-    lf_queue _pending;
-    lf_queue _completed;
-    struct alignas(seastar::cache_line_size) {
-        size_t _sent = 0;
-        size_t _compl = 0;
-        size_t _last_snt_batch = 0;
-        size_t _last_cmpl_batch = 0;
-        size_t _current_queue_length = 0;
-    };
-    // keep this between two structures with statistics
-    // this makes sure that they have at least one cache line
-    // between them, so hw prefetcher will not accidentally prefetch
-    // cache line used by another cpu.
-    metrics::metric_groups _metrics;
-    struct alignas(seastar::cache_line_size) {
-        size_t _received = 0;
-        size_t _last_rcv_batch = 0;
-    };
-    struct work_item {
-        explicit work_item(smp_service_group ssg) : ssg(ssg) {}
-        smp_service_group ssg;
-        scheduling_group sg = current_scheduling_group();
-        virtual ~work_item() {}
-        virtual void process() = 0;
-        virtual void complete() = 0;
-    };
-    template <typename Func>
-    struct async_work_item : work_item {
-        smp_message_queue& _queue;
-        Func _func;
-        using futurator = futurize<std::result_of_t<Func()>>;
-        using future_type = typename futurator::type;
-        using value_type = typename future_type::value_type;
-        compat::optional<value_type> _result;
-        std::exception_ptr _ex; // if !_result
-        typename futurator::promise_type _promise; // used on local side
-        async_work_item(smp_message_queue& queue, smp_service_group ssg, Func&& func) : work_item(ssg), _queue(queue), _func(std::move(func)) {}
-        virtual void process() override {
-            try {
-              // FIXME: future is discarded
-              (void)with_scheduling_group(this->sg, [this] {
-                return futurator::apply(this->_func).then_wrapped([this] (auto f) {
-                    if (f.failed()) {
-                        _ex = f.get_exception();
-                    } else {
-                        _result = f.get();
-                    }
-                    _queue.respond(this);
-                });
-              });
-            } catch (...) {
-                _ex = std::current_exception();
-                _queue.respond(this);
-            }
-        }
-        virtual void complete() override {
-            if (_result) {
-                _promise.set_value(std::move(*_result));
-            } else {
-                // FIXME: _ex was allocated on another cpu
-                _promise.set_exception(std::move(_ex));
-            }
-        }
-        future_type get_future() { return _promise.get_future(); }
-    };
-    union tx_side {
-        tx_side() {}
-        ~tx_side() {}
-        void init() { new (&a) aa; }
-        struct aa {
-            std::deque<work_item*> pending_fifo;
-        } a;
-    } _tx;
-    std::vector<work_item*> _completed_fifo;
-public:
-    smp_message_queue(reactor* from, reactor* to);
-    ~smp_message_queue();
-    template <typename Func>
-    futurize_t<std::result_of_t<Func()>> submit(shard_id t, smp_service_group ssg, Func&& func) {
-        auto wi = std::make_unique<async_work_item<Func>>(*this, ssg, std::forward<Func>(func));
-        auto fut = wi->get_future();
-        submit_item(t, std::move(wi));
-        return fut;
-    }
-    void start(unsigned cpuid);
-    template<size_t PrefetchCnt, typename Func>
-    size_t process_queue(lf_queue& q, Func process);
-    size_t process_incoming();
-    size_t process_completions(shard_id t);
-    void stop();
-private:
-    void work();
-    void submit_item(shard_id t, std::unique_ptr<work_item> wi);
-    void respond(work_item* wi);
-    void move_pending();
-    void flush_request_batch();
-    void flush_response_batch();
-    bool has_unflushed_responses() const;
-    bool pure_poll_rx() const;
-    bool pure_poll_tx() const;
-
-    friend class smp;
-};
 
 class reactor_backend_selector;
 
@@ -367,30 +150,15 @@ class cpu_stall_detector;
 }
 
 class io_desc;
+class io_queue;
 class disk_config_params;
 
 class reactor {
     using sched_clock = std::chrono::steady_clock;
 private:
-    struct pollfn {
-        virtual ~pollfn() {}
-        // Returns true if work was done (false = idle)
-        virtual bool poll() = 0;
-        // Checks if work needs to be done, but without actually doing any
-        // returns true if works needs to be done (false = idle)
-        virtual bool pure_poll() = 0;
-        // Tries to enter interrupt mode.
-        //
-        // If it returns true, then events from this poller will wake
-        // a sleeping idle loop, and exit_interrupt_mode() must be called
-        // to return to normal polling.
-        //
-        // If it returns false, the sleeping idle loop may not be entered.
-        virtual bool try_enter_interrupt_mode() { return false; }
-        virtual void exit_interrupt_mode() {}
-    };
     struct task_queue;
     using task_queue_list = circular_buffer_fixed_capacity<task_queue*, max_scheduling_groups()>;
+    using pollfn = seastar::pollfn;
 
     class io_pollfn;
     class signal_pollfn;
@@ -443,8 +211,8 @@ public:
         no_more_work,
         interrupted_by_higher_priority_task
     };
-    using work_waiting_on_reactor = const std::function<bool()>&;
-    using idle_cpu_handler = std::function<idle_cpu_handler_result(work_waiting_on_reactor)>;
+    using work_waiting_on_reactor = const noncopyable_function<bool()>&;
+    using idle_cpu_handler = noncopyable_function<idle_cpu_handler_result(work_waiting_on_reactor)>;
 
     struct io_stats {
         uint64_t aio_reads = 0;
@@ -489,13 +257,13 @@ private:
     std::unordered_map<dev_t, io_queue*> _io_queues;
     friend io_queue;
 
-    std::vector<std::function<future<> ()>> _exit_funcs;
+    std::vector<noncopyable_function<future<> ()>> _exit_funcs;
     unsigned _id = 0;
     bool _stopping = false;
     bool _stopped = false;
     condition_variable _stop_requested;
     bool _handle_sigint = true;
-    promise<std::unique_ptr<network_stack>> _network_stack_ready_promise;
+    std::optional<future<std::unique_ptr<network_stack>>> _network_stack_ready;
     int _return = 0;
     promise<> _start_promise;
     semaphore _cpu_started;
@@ -531,6 +299,12 @@ private:
         uint64_t _tasks_processed = 0;
         circular_buffer<std::unique_ptr<task>> _q;
         sstring _name;
+        /**
+         * This array holds pointers to the scheduling group specific
+         * data. The pointer is not use as is but is cast to a reference
+         * to the appropriate type that is actually pointed to.
+         */
+        std::vector<void*> _scheduling_group_specific_vals;
         int64_t to_vruntime(sched_clock::duration runtime) const;
         void set_shares(float shares);
         struct indirect_compare;
@@ -541,6 +315,7 @@ private:
         void register_stats();
     };
     boost::container::static_vector<std::unique_ptr<task_queue>, max_scheduling_groups()> _task_queues;
+    std::vector<scheduling_group_key_config> _scheduling_group_key_configs;
     int64_t _last_vruntime = 0;
     task_queue_list _active_task_queues;
     task_queue_list _activating_task_queues;
@@ -548,7 +323,7 @@ private:
     sched_clock::duration _task_quota;
     /// Handler that will be called when there is no task to execute on cpu.
     /// It represents a low priority work.
-    /// 
+    ///
     /// Handler's return value determines whether handler did any actual work. If no work was done then reactor will go
     /// into sleep.
     ///
@@ -574,6 +349,7 @@ private:
     bool _strict_o_direct = true;
     bool _force_io_getevents_syscall = false;
     bool _bypass_fsync = false;
+    bool _have_aio_fsync = false;
     std::atomic<bool> _dying{false};
 private:
     static std::chrono::nanoseconds calculate_poll_time();
@@ -604,7 +380,7 @@ private:
 
 public:
     /// Register a user-defined signal handler
-    void handle_signal(int signo, std::function<void ()>&& handler);
+    void handle_signal(int signo, noncopyable_function<void ()>&& handler);
 
 private:
     class signals {
@@ -614,19 +390,19 @@ private:
 
         bool poll_signal();
         bool pure_poll_signal() const;
-        void handle_signal(int signo, std::function<void ()>&& handler);
-        void handle_signal_once(int signo, std::function<void ()>&& handler);
+        void handle_signal(int signo, noncopyable_function<void ()>&& handler);
+        void handle_signal_once(int signo, noncopyable_function<void ()>&& handler);
         static void action(int signo, siginfo_t* siginfo, void* ignore);
         static void failed_to_handle(int signo);
     private:
         struct signal_handler {
-            signal_handler(int signo, std::function<void ()>&& handler);
-            std::function<void ()> _handler;
+            signal_handler(int signo, noncopyable_function<void ()>&& handler);
+            noncopyable_function<void ()> _handler;
         };
         std::atomic<uint64_t> _pending_signals;
         std::unordered_map<int, signal_handler> _signal_handlers;
 
-        friend void reactor::handle_signal(int, std::function<void ()>&&);
+        friend void reactor::handle_signal(int, noncopyable_function<void ()>&&);
     };
 
     signals _signals;
@@ -645,8 +421,20 @@ private:
     void insert_activating_task_queues();
     void account_runtime(task_queue& tq, sched_clock::duration runtime);
     void account_idle(sched_clock::duration idletime);
-    void init_scheduling_group(scheduling_group sg, sstring name, float shares);
-    void destroy_scheduling_group(scheduling_group sg);
+    void allocate_scheduling_group_specific_data(scheduling_group sg, scheduling_group_key key);
+    future<> init_scheduling_group(scheduling_group sg, sstring name, float shares);
+    future<> init_new_scheduling_group_key(scheduling_group_key key, scheduling_group_key_config cfg);
+    future<> destroy_scheduling_group(scheduling_group sg);
+    [[noreturn]] void no_such_scheduling_group(scheduling_group sg);
+    void* get_scheduling_group_specific_value(scheduling_group sg, scheduling_group_key key) {
+        if (!_task_queues[sg._id]) {
+            no_such_scheduling_group(sg);
+        }
+        return _task_queues[sg._id]->_scheduling_group_specific_vals[key.id()];
+    }
+    void* get_scheduling_group_specific_value(scheduling_group_key key) {
+        return get_scheduling_group_specific_value(*internal::current_scheduling_group_ptr(), key);
+    }
     uint64_t tasks_processed() const;
     uint64_t min_vruntime() const;
     void request_preemption();
@@ -697,10 +485,11 @@ public:
 
     bool posix_reuseport_available() const { return _reuseport; }
 
-    lw_shared_ptr<pollable_fd> make_pollable_fd(socket_address sa, transport proto = transport::TCP);
+    lw_shared_ptr<pollable_fd> make_pollable_fd(socket_address sa, int proto);
+
     future<> posix_connect(lw_shared_ptr<pollable_fd> pfd, socket_address sa, socket_address local);
 
-    future<pollable_fd, socket_address> accept(pollable_fd_state& listen_fd);
+    future<std::tuple<pollable_fd, socket_address>> accept(pollable_fd_state& listen_fd);
 
     future<size_t> read_some(pollable_fd_state& fd, void* buffer, size_t size);
     future<size_t> read_some(pollable_fd_state& fd, const std::vector<iovec>& iov);
@@ -730,13 +519,16 @@ public:
     // In the following three methods, prepare_io is not guaranteed to execute in the same processor
     // in which it was generated. Therefore, care must be taken to avoid the use of objects that could
     // be destroyed within or at exit of prepare_io.
-    template <typename Func>
-    void submit_io(io_desc* desc, Func prepare_io);
-
-    template <typename Func>
-    future<internal::linux_abi::io_event> submit_io_read(io_queue* ioq, const io_priority_class& priority_class, size_t len, Func prepare_io);
-    template <typename Func>
-    future<internal::linux_abi::io_event> submit_io_write(io_queue* ioq, const io_priority_class& priority_class, size_t len, Func prepare_io);
+    void submit_io(io_desc* desc,
+            noncopyable_function<void (internal::linux_abi::iocb&)> prepare_io);
+    future<internal::linux_abi::io_event> submit_io_read(io_queue* ioq,
+            const io_priority_class& priority_class,
+            size_t len,
+            noncopyable_function<void (internal::linux_abi::iocb&)> prepare_io);
+    future<internal::linux_abi::io_event> submit_io_write(io_queue* ioq,
+            const io_priority_class& priority_class,
+            size_t len,
+            noncopyable_function<void (internal::linux_abi::iocb&)> prepare_io);
 
     inline void handle_io_result(const internal::linux_abi::io_event& ev) {
         auto res = long(ev.res);
@@ -756,7 +548,7 @@ public:
         return _stop_requested.wait(timeout, [this] { return _stopping; });
     }
 
-    void at_exit(std::function<future<> ()> func);
+    void at_exit(noncopyable_function<future<> ()> func);
 
     template <typename Func>
     void at_destroy(Func&& func) {
@@ -794,7 +586,7 @@ public:
 
     /// Set a handler that will be called when there is no task to execute on cpu.
     /// Handler should do a low priority work.
-    /// 
+    ///
     /// Handler's return value determines whether handler did any actual work. If no work was done then reactor will go
     /// into sleep.
     ///
@@ -839,6 +631,8 @@ private:
 
     bool process_io();
 
+    future<> fdatasync(int fd);
+
     void add_timer(timer<steady_clock_type>*);
     bool queue_timer(timer<steady_clock_type>*);
     void del_timer(timer<steady_clock_type>*);
@@ -870,6 +664,24 @@ private:
     friend future<scheduling_group> create_scheduling_group(sstring name, float shares);
     friend future<> seastar::destroy_scheduling_group(scheduling_group);
     friend future<> seastar::rename_scheduling_group(scheduling_group sg, sstring new_name);
+    friend future<scheduling_group_key> scheduling_group_key_create(scheduling_group_key_config cfg);
+
+    template<typename T>
+    friend T& scheduling_group_get_specific(scheduling_group sg, scheduling_group_key key);
+    template<typename T>
+    friend T& scheduling_group_get_specific(scheduling_group_key key);
+    template<typename SpecificValType, typename Mapper, typename Reducer, typename Initial>
+        GCC6_CONCEPT( requires requires(SpecificValType specific_val, Mapper mapper, Reducer reducer, Initial initial) {
+            {reducer(initial, mapper(specific_val))} -> Initial;
+        })
+    friend future<typename function_traits<Reducer>::return_type>
+    map_reduce_scheduling_group_specific(Mapper mapper, Reducer reducer, Initial initial_val, scheduling_group_key key);
+    template<typename SpecificValType, typename Reducer, typename Initial>
+    GCC6_CONCEPT( requires requires(SpecificValType specific_val, Reducer reducer, Initial initial) {
+        {reducer(initial, specific_val)} -> Initial;
+    })
+    friend future<typename function_traits<Reducer>::return_type>
+        reduce_scheduling_group_specific(Reducer reducer, Initial initial_val, scheduling_group_key key);
 public:
     bool wait_and_process(int timeout = 0, const sigset_t* active_sigmask = nullptr);
     future<> readable(pollable_fd_state& fd);
@@ -925,115 +737,6 @@ inline bool engine_is_ready() {
     return local_engine != nullptr;
 }
 
-class smp {
-    static std::vector<posix_thread> _threads;
-    static std::vector<std::function<void ()>> _thread_loops; // for dpdk
-    static compat::optional<boost::barrier> _all_event_loops_done;
-    static std::vector<reactor*> _reactors;
-    struct qs_deleter {
-      void operator()(smp_message_queue** qs) const;
-    };
-    static std::unique_ptr<smp_message_queue*[], qs_deleter> _qs;
-    static std::thread::id _tmain;
-    static bool _using_dpdk;
-
-    template <typename Func>
-    using returns_future = is_future<std::result_of_t<Func()>>;
-    template <typename Func>
-    using returns_void = std::is_same<std::result_of_t<Func()>, void>;
-public:
-    static boost::program_options::options_description get_options_description();
-    static void register_network_stacks();
-    static void configure(boost::program_options::variables_map vm, reactor_config cfg = {});
-    static void cleanup();
-    static void cleanup_cpu();
-    static void arrive_at_event_loop_end();
-    static void join_all();
-    static bool main_thread() { return std::this_thread::get_id() == _tmain; }
-
-    static std::string _rdma_device;
-
-    /// Runs a function on a remote core.
-    ///
-    /// \param t designates the core to run the function on (may be a remote
-    ///          core or the local core).
-    /// \param ssg an smp_service_group that controls resource allocation for this call.
-    /// \param func a callable to run on core \c t.
-    ///          If \c func is a temporary object, its lifetime will be
-    ///          extended by moving. This movement and the eventual
-    ///          destruction of func are both done in the _calling_ core.
-    ///          If \c func is a reference, the caller must guarantee that
-    ///          it will survive the call.
-    /// \return whatever \c func returns, as a future<> (if \c func does not return a future,
-    ///         submit_to() will wrap it in a future<>).
-    template <typename Func>
-    static futurize_t<std::result_of_t<Func()>> submit_to(unsigned t, smp_service_group ssg, Func&& func) {
-        using ret_type = std::result_of_t<Func()>;
-        if (t == engine().cpu_id()) {
-            try {
-                if (!is_future<ret_type>::value) {
-                    // Non-deferring function, so don't worry about func lifetime
-                    return futurize<ret_type>::apply(std::forward<Func>(func));
-                } else if (std::is_lvalue_reference<Func>::value) {
-                    // func is an lvalue, so caller worries about its lifetime
-                    return futurize<ret_type>::apply(func);
-                } else {
-                    // Deferring call on rvalue function, make sure to preserve it across call
-                    auto w = std::make_unique<std::decay_t<Func>>(std::move(func));
-                    auto ret = futurize<ret_type>::apply(*w);
-                    return ret.finally([w = std::move(w)] {});
-                }
-            } catch (...) {
-                // Consistently return a failed future rather than throwing, to simplify callers
-                return futurize<std::result_of_t<Func()>>::make_exception_future(std::current_exception());
-            }
-        } else {
-            return _qs[t][engine().cpu_id()].submit(t, ssg, std::forward<Func>(func));
-        }
-    }
-    /// Runs a function on a remote core.
-    ///
-    /// Uses default_smp_service_group() to control resource allocation.
-    ///
-    /// \param t designates the core to run the function on (may be a remote
-    ///          core or the local core).
-    /// \param func a callable to run on core \c t.
-    ///          If \c func is a temporary object, its lifetime will be
-    ///          extended by moving. This movement and the eventual
-    ///          destruction of func are both done in the _calling_ core.
-    ///          If \c func is a reference, the caller must guarantee that
-    ///          it will survive the call.
-    /// \return whatever \c func returns, as a future<> (if \c func does not return a future,
-    ///         submit_to() will wrap it in a future<>).
-    template <typename Func>
-    static futurize_t<std::result_of_t<Func()>> submit_to(unsigned t, Func&& func) {
-        return submit_to(t, default_smp_service_group(), std::forward<Func>(func));
-    }
-    static bool poll_queues();
-    static bool pure_poll_queues();
-    static boost::integer_range<unsigned> all_cpus() {
-        return boost::irange(0u, count);
-    }
-    // Invokes func on all shards.
-    // The returned future resolves when all async invocations finish.
-    // The func may return void or future<>.
-    // Each async invocation will work with a separate copy of func.
-    template<typename Func>
-    static future<> invoke_on_all(Func&& func) {
-        static_assert(std::is_same<future<>, typename futurize<std::result_of_t<Func()>>::type>::value, "bad Func signature");
-        return parallel_for_each(all_cpus(), [&func] (unsigned id) {
-            return smp::submit_to(id, Func(func));
-        });
-    }
-private:
-    static void start_all_queues();
-    static void pin(unsigned cpu_id);
-    static void allocate_reactor(unsigned id, reactor_backend_selector rbs, reactor_config cfg);
-    static void create_thread(std::function<void ()> thread_loop);
-public:
-    static unsigned count;
-};
-
 inline
 pollable_fd_state::~pollable_fd_state() {
     engine().forget(*this);
@@ -1050,11 +753,13 @@ size_t iovec_len(const iovec* begin, size_t len)
     return ret;
 }
 
+inline int alarm_signal() {
+    // We don't want to use SIGALRM, because the boost unit test library
+    // also plays with it.
+    return SIGRTMIN;
+}
+
+
 extern logger seastar_logger;
 
 }
-
-// FIXME: we can't include this on the top because io_queue depends on class smp,
-// which is defined in reactor.hh. In any case io_queue.hh needs to be made private.
-// We include it here because reactor::get_io_queue() exists and returns an io_queue.
-#include <seastar/core/io_queue.hh>

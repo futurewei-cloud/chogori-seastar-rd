@@ -31,6 +31,7 @@
 #include <seastar/core/temporary_buffer.hh>
 #include <seastar/core/iostream.hh>
 #include <seastar/util/std-compat.hh>
+#include "../core/internal/api-level.hh"
 #include <sys/types.h>
 
 namespace seastar {
@@ -75,7 +76,14 @@ using keepalive_params = compat::variant<tcp_keepalive_params, sctp_keepalive_pa
 /// \cond internal
 class connected_socket_impl;
 class socket_impl;
-class server_socket_impl;
+
+#if SEASTAR_API_LEVEL <= 1
+
+SEASTAR_INCLUDE_API_V1 namespace api_v1 { class server_socket_impl; }
+
+#endif
+
+SEASTAR_INCLUDE_API_V2 namespace api_v2 { class server_socket_impl; }
 class udp_channel_impl;
 class get_impl;
 /// \endcond
@@ -128,6 +136,8 @@ public:
     /// shutdown_output().
     void close();
 };
+
+class network_interface_impl;
 
 } /* namespace net */
 
@@ -217,7 +227,13 @@ public:
     /// Attempts to establish the connection.
     ///
     /// \return a \ref connected_socket representing the connection.
-    future<connected_socket> connect(socket_address sa, socket_address local = socket_address(::sockaddr_in{AF_INET, INADDR_ANY, {0}}), transport proto = transport::TCP);
+    future<connected_socket> connect(socket_address sa, socket_address local = {}, transport proto = transport::TCP);
+
+    /// Sets SO_REUSEADDR option (enable reuseaddr option on a socket)
+    void set_reuseaddr(bool reuseaddr);
+    /// Gets O_REUSEADDR option
+    /// \return whether the reuseaddr option is enabled or not
+    bool get_reuseaddr() const;
     /// Stops any in-flight connection attempt.
     ///
     /// Cancels the connection attempt if it's still in progress, and
@@ -230,9 +246,17 @@ public:
 /// \addtogroup networking-module
 /// @{
 
+/// The result of an server_socket::accept() call
+struct accept_result {
+    connected_socket connection;  ///< The newly-accepted connection
+    socket_address remote_address;  ///< The address of the peer that connected to us
+};
+
+SEASTAR_INCLUDE_API_V2 namespace api_v2 {
+
 /// A listening socket, waiting to accept incoming network connections.
 class server_socket {
-    std::unique_ptr<net::server_socket_impl> _ssi;
+    std::unique_ptr<net::api_v2::server_socket_impl> _ssi;
     bool _aborted = false;
 public:
     enum class load_balancing_algorithm {
@@ -249,7 +273,7 @@ public:
     /// Constructs a \c server_socket not corresponding to a connection
     server_socket();
     /// \cond internal
-    explicit server_socket(std::unique_ptr<net::server_socket_impl> ssi);
+    explicit server_socket(std::unique_ptr<net::api_v2::server_socket_impl> ssi);
     /// \endcond
     /// Moves a \c server_socket object.
     server_socket(server_socket&& ss) noexcept;
@@ -259,12 +283,12 @@ public:
 
     /// Accepts the next connection to successfully connect to this socket.
     ///
-    /// \return a \ref connected_socket representing the connection, and
-    ///         a \ref socket_address describing the remote endpoint.
+    /// \return an accept_result representing the connection and
+    ///         the socket_address of the remote endpoint.
     ///
     /// \see listen(socket_address sa)
     /// \see listen(socket_address sa, listen_options opts)
-    future<connected_socket, socket_address> accept();
+    future<accept_result> accept();
 
     /// Stops any \ref accept() in progress.
     ///
@@ -275,6 +299,36 @@ public:
     /// Local bound address
     socket_address local_address() const;
 };
+
+}
+
+#if SEASTAR_API_LEVEL <= 1
+
+SEASTAR_INCLUDE_API_V1 namespace api_v1 {
+
+class server_socket {
+    api_v2::server_socket _impl;
+private:
+    static api_v2::server_socket make_v2_server_socket(std::unique_ptr<net::api_v1::server_socket_impl>);
+public:
+    using load_balancing_algorithm = api_v2::server_socket::load_balancing_algorithm;
+    server_socket();
+    explicit server_socket(std::unique_ptr<net::api_v1::server_socket_impl> ssi);
+    explicit server_socket(std::unique_ptr<net::api_v2::server_socket_impl> ssi);
+    server_socket(server_socket&& ss) noexcept;
+    server_socket(api_v2::server_socket&& ss);
+    ~server_socket();
+    operator api_v2::server_socket() &&;
+    server_socket& operator=(server_socket&& cs) noexcept;
+    future<connected_socket, socket_address> accept();
+    void abort_accept();
+    socket_address local_address() const;
+};
+
+}
+
+#endif
+
 /// @}
 
 struct listen_options {
@@ -282,6 +336,29 @@ struct listen_options {
     server_socket::load_balancing_algorithm lba = server_socket::load_balancing_algorithm::default_;
     transport proto = transport::TCP;
     int listen_backlog = 100;
+};
+
+class network_interface {
+private:
+    shared_ptr<net::network_interface_impl> _impl;
+public:
+    network_interface(shared_ptr<net::network_interface_impl>);
+    network_interface(network_interface&&);
+
+    network_interface& operator=(network_interface&&);
+
+    uint32_t index() const;
+    uint32_t mtu() const;
+
+    const sstring& name() const;
+    const sstring& display_name() const;
+    const std::vector<net::inet_address>& addresses() const;
+    const std::vector<uint8_t> hardware_address() const;
+
+    bool is_loopback() const;
+    bool is_virtual() const;
+    bool is_up() const;
+    bool supports_ipv6() const;
 };
 
 class network_stack {
@@ -302,6 +379,13 @@ public:
     virtual bool supports_ipv6() const {
         return false;
     }
+
+    /** 
+     * Returns available network interfaces. This represents a 
+     * snapshot of interfaces available at call time, hence the
+     * return by value.
+     */
+    virtual std::vector<network_interface> network_interfaces();
 };
 
 }

@@ -1281,7 +1281,8 @@ public:
 
     void start() {
         _chan = engine().net().make_udp_channel({_port});
-        keep_doing([this] {
+        // Run in the background.
+        (void)keep_doing([this] {
             return _chan.receive().then([this](udp_datagram dgram) {
                 packet& p = dgram.get_data();
                 if (p.len() < sizeof(header)) {
@@ -1319,7 +1320,7 @@ public:
 
 class tcp_server {
 private:
-    lw_shared_ptr<server_socket> _listener;
+    lw_shared_ptr<seastar::api_v2::server_socket> _listener;
     sharded_cache& _cache;
     distributed<system_stats>& _system_stats;
     uint16_t _port;
@@ -1355,11 +1356,14 @@ public:
     void start() {
         listen_options lo;
         lo.reuse_address = true;
-        _listener = engine().listen(make_ipv4_address({_port}), lo);
-        keep_doing([this] {
-            return _listener->accept().then([this] (connected_socket fd, socket_address addr) mutable {
+        _listener = seastar::api_v2::server_socket(engine().listen(make_ipv4_address({_port}), lo));
+        // Run in the background until eof has reached on the input connection.
+        (void)keep_doing([this] {
+            return _listener->accept().then([this] (accept_result ar) mutable {
+                connected_socket fd = std::move(ar.connection);
+                socket_address addr = std::move(ar.remote_address);
                 auto conn = make_lw_shared<connection>(std::move(fd), addr, _cache, _system_stats);
-                do_until([conn] { return conn->_in.eof(); }, [conn] {
+                (void)do_until([conn] { return conn->_in.eof(); }, [conn] {
                     return conn->_proto.handle(conn->_in, conn->_out).then([conn] {
                         return conn->_out.flush();
                     });
@@ -1383,7 +1387,7 @@ public:
 
     void start() {
         _timer.set_callback([this] {
-            _cache.stats().then([] (auto stats) {
+            (void)_cache.stats().then([] (auto stats) {
                 auto gets_total = stats._get_hits + stats._get_misses;
                 auto get_hit_rate = gets_total ? ((double)stats._get_hits * 100 / gets_total) : 0;
                 auto sets_total = stats._set_adds + stats._set_replaces;

@@ -24,6 +24,7 @@
 #include <seastar/core/reactor.hh>
 #include <seastar/core/future-util.hh>
 #include <seastar/util/is_smart_ptr.hh>
+#include <seastar/util/tuple_utils.hh>
 #include <seastar/core/do_with.hh>
 #include <boost/iterator/counting_iterator.hpp>
 #include <functional>
@@ -360,7 +361,7 @@ public:
     ///
     /// \tparam  Mapper unary function taking `Service&` and producing some result.
     /// \return  Result vector of applying `map` to each instance in parallel
-    template <typename Mapper, typename return_type = std::result_of_t<Mapper(Service&)>>
+    template <typename Mapper, typename Future = futurize_t<std::result_of_t<Mapper(Service&)>>, typename return_type = decltype(internal::untuple(std::declval<typename Future::value_type>()))>
     inline future<std::vector<return_type>> map(Mapper mapper) {
         return do_with(std::vector<return_type>(),
                 [&mapper, this] (std::vector<return_type>& vec) mutable {
@@ -570,6 +571,57 @@ sharded<Service>::start_single(Args&&... args) {
     });
 }
 
+namespace internal {
+
+// Helper check if Service::stop exists
+
+struct sharded_has_stop {
+    // If a member names "stop" exists, try to call it, even if it doesn't
+    // have the correct signature. This is so that we don't ignore a function
+    // named stop() just because the signature is incorrect, and instead
+    // force the user to resolve the ambiguity.
+    template <typename Service>
+    constexpr static auto check(int) -> std::enable_if_t<(sizeof(&Service::stop) >= 0), bool> {
+        return true;
+    }
+
+    // Fallback in case Service::stop doesn't exist.
+    template<typename>
+    static constexpr auto check(...) -> bool {
+        return false;
+    }
+};
+
+template <bool stop_exists>
+struct sharded_call_stop {
+    template <typename Service>
+    static future<> call(Service& instance);
+};
+
+template <>
+template <typename Service>
+inline
+future<> sharded_call_stop<true>::call(Service& instance) {
+    return instance.stop();
+}
+
+template <>
+template <typename Service>
+inline
+future<> sharded_call_stop<false>::call(Service& instance) {
+    return make_ready_future<>();
+}
+
+template <typename Service>
+inline
+future<>
+stop_sharded_instance(Service& instance) {
+    constexpr bool has_stop = internal::sharded_has_stop::check<Service>(0);
+    return internal::sharded_call_stop<has_stop>::call(instance);
+}
+
+}
+
 template <typename Service>
 future<>
 sharded<Service>::stop() {
@@ -579,7 +631,7 @@ sharded<Service>::stop() {
             if (!inst) {
                 return make_ready_future<>();
             }
-            return inst->stop();
+            return internal::stop_sharded_instance(*inst);
         });
     }).then([this] {
         return internal::sharded_parallel_for_each(_instances.size(), [this] (unsigned c) {
@@ -764,7 +816,12 @@ public:
     /// Checks whether the wrapped pointer is non-null.
     operator bool() const { return static_cast<bool>(_value); }
     /// Move-assigns a \c foreign_ptr<>.
-    foreign_ptr& operator=(foreign_ptr&& other) = default;
+    foreign_ptr& operator=(foreign_ptr&& other) noexcept(std::is_nothrow_move_constructible<PtrType>::value) {
+         destroy(std::move(_value), _cpu);
+        _value = std::move(other._value);
+        _cpu = other._cpu;
+        return *this;
+    }
     /// Releases the owned pointer
     ///
     /// Warning: the caller is now responsible for destroying the

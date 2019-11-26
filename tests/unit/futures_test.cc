@@ -572,7 +572,7 @@ SEASTAR_TEST_CASE(test_high_priority_task_runs_before_ready_continuations) {
         engine().add_high_priority_task(make_task([flag] {
             *flag = true;
         }));
-        make_ready_future().then([flag] {
+        return make_ready_future().then([flag] {
             BOOST_REQUIRE(*flag);
         });
     });
@@ -691,6 +691,12 @@ SEASTAR_TEST_CASE(futurize_apply_void_future_ok) {
     });
 }
 
+SEASTAR_TEST_CASE(test_unused_shared_future_is_not_a_broken_future) {
+    promise<> p;
+    shared_future<> s(p.get_future());
+    return make_ready_future<>();
+}
+
 SEASTAR_TEST_CASE(test_shared_future_propagates_value_to_all) {
     return seastar::async([] {
         promise<shared_ptr<int>> p; // shared_ptr<> to check it deals with emptyable types
@@ -778,6 +784,21 @@ SEASTAR_TEST_CASE(test_shared_future_propagates_errors_to_all) {
     });
 }
 
+SEASTAR_TEST_CASE(test_ignored_future_warning) {
+    // This doesn't warn:
+    promise<> p;
+    p.set_exception(expected_exception());
+    future<> f = p.get_future();
+    f.ignore_ready_future();
+
+    // And by analogy, neither should this
+    shared_promise<> p2;
+    p2.set_exception(expected_exception());
+    future<> f2 = p2.get_shared_future();
+    f2.ignore_ready_future();
+    return make_ready_future<>();
+}
+
 SEASTAR_TEST_CASE(test_futurize_from_tuple) {
     std::tuple<int> v1 = std::make_tuple(3);
     std::tuple<> v2 = {};
@@ -799,6 +820,32 @@ SEASTAR_TEST_CASE(test_repeat_until_value) {
             BOOST_REQUIRE(counter == 10000);
             BOOST_REQUIRE(result == counter);
         });
+    });
+}
+
+SEASTAR_TEST_CASE(test_repeat_until_value_implicit_future) {
+    // Same as above, but returning compat::optional<int> instead of future<compat::optional<int>>
+    return do_with(int(), [] (int& counter) {
+        return repeat_until_value([&counter] {
+            if (counter == 10000) {
+                return compat::optional<int>(counter);
+            } else {
+                ++counter;
+                return compat::optional<int>(compat::nullopt);
+            }
+        }).then([&counter] (int result) {
+            BOOST_REQUIRE(counter == 10000);
+            BOOST_REQUIRE(result == counter);
+        });
+    });
+}
+
+SEASTAR_TEST_CASE(test_repeat_until_value_exception) {
+    return repeat_until_value([] {
+        throw expected_exception();
+        return compat::optional<int>(43);
+    }).then_wrapped([] (future<int> f) {
+        check_fails_with_expected(std::move(f));
     });
 }
 
@@ -1101,4 +1148,15 @@ SEASTAR_THREAD_TEST_CASE(test_broken_promises) {
         f = p.get_future();
     }
     BOOST_CHECK_THROW(f->get(), broken_promise);
+}
+
+SEASTAR_TEST_CASE(test_warn_on_broken_promise_with_no_future) {
+    // Example code where we expect a "Exceptional future ignored"
+    // warning. We can't directly test that the warning is issued, but
+    // this example functions as documentation.
+    promise<> p;
+    // Intentionally destroy the future
+    (void)p.get_future();
+    p.set_exception(std::runtime_error("foo"));
+    return make_ready_future<>();
 }
