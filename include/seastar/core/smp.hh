@@ -273,6 +273,8 @@ public:
     static void join_all();
     static bool main_thread() { return std::this_thread::get_id() == _tmain; }
 
+    static std::string _rdma_device;
+
     /// Runs a function on a remote core.
     ///
     /// \param t designates the core to run the function on (may be a remote
