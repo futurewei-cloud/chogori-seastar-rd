@@ -661,10 +661,10 @@ future<std::unique_ptr<RDMAConnection>> RDMAStack::accept() {
     return acceptPromise.get_future();
 }
 
-std::unique_ptr<RDMAConnection> RDMAStack::connect(const EndPoint& remote) {
+future<std::unique_ptr<RDMAConnection>> RDMAStack::connect(const EndPoint& remote) {
     std::unique_ptr<RDMAConnection> conn = std::make_unique<RDMAConnection>(this, remote);
     conn->makeHandshakeRequest();
-    return conn;
+    return make_ready_future<std::unique_ptr<RDMAConnection>>(std::move(conn));
 }
 
 void RDMAStack::processUDMessage(UDMessage* message, EndPoint remote) {

@@ -175,7 +175,7 @@ public:
     EndPoint localEndpoint;
 
     future<std::unique_ptr<RDMAConnection>> accept();
-    std::unique_ptr<RDMAConnection> connect(const EndPoint& remote);
+    future<std::unique_ptr<RDMAConnection>> connect(const EndPoint& remote);
 
     static std::unique_ptr<RDMAStack> makeRDMAStack(void* memRegion, size_t memRegionSize);
     RDMAStack() = default;
