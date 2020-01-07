@@ -158,9 +158,9 @@ private:
     bool recvPromiseActive = false;
     promise<Buffer> recvPromise;
 
-    void makeQP();
+    future<> makeQP();
     void makeHandshakeRequest();
-    void completeHandshake(uint32_t remoteQP);
+    future<> completeHandshake(uint32_t remoteQP);
     void processHandshakeRequest(uint32_t remoteQP, uint32_t responseId);
 
     void shutdownConnection();
@@ -175,7 +175,7 @@ public:
     EndPoint localEndpoint;
 
     future<std::unique_ptr<RDMAConnection>> accept();
-    future<std::unique_ptr<RDMAConnection>> connect(const EndPoint& remote);
+    std::unique_ptr<RDMAConnection> connect(const EndPoint& remote);
 
     static std::unique_ptr<RDMAStack> makeRDMAStack(void* memRegion, size_t memRegionSize);
     RDMAStack() = default;

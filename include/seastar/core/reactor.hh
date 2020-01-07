@@ -136,6 +136,7 @@ class thread_pool;
 class smp;
 namespace rdma {
 class RDMAStack;
+class RDMAConnection;
 }
 
 class reactor_backend_selector;
@@ -186,6 +187,7 @@ private:
     friend class internal::reactor_stall_sampler;
     friend class reactor_backend_epoll;
     friend class reactor_backend_aio;
+    friend class rdma::RDMAConnection;
 public:
     class poller {
         std::unique_ptr<pollfn> _pollfn;
