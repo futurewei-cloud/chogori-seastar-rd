@@ -62,6 +62,8 @@ future<> RDMAConnection::makeQP() {
 
     return engine()._thread_pool->submit<struct ibv_qp*>([init_attr, PD=stack->protectionDomain]() mutable {
         // Create QP
+        // For all ll ibv_* calls with attr (attribute) parameters, the attr is passed by pointer because 
+        // it is a C interface, but the struct does not need to live beyond the ibv_ call.
         struct ibv_qp* QP = ibv_create_qp(PD, &init_attr);
         if (!QP) {
             K2ERROR("Failed to create RC QP: " << strerror(errno));
@@ -574,7 +576,9 @@ future<struct ibv_ah*> RDMAStack::getAH(const union ibv_gid& GID) {
         fillAHAttr(AHAttr, GID);
 
         AH = ibv_create_ah(stack->protectionDomain, &AHAttr);
-        K2ASSERT(AH, "Failed to create AH");
+        if (!AH) {
+            return AH;
+        }
 
         stack->AHLookup[GID] = AH;
         return AH;
@@ -586,6 +590,7 @@ int RDMAStack::sendUDQPMessage(Buffer buffer, const union ibv_gid& destGID, uint
 
     (void) getAH(destGID).then([destQP, buff=std::move(buffer), stack=weak_from_this()] (struct ibv_ah* AH) mutable {
         if (!stack || !AH) {
+            K2WARN("Failed to create RDMA address handle!");
             return;
         }
 
