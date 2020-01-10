@@ -188,6 +188,7 @@ private:
     friend class reactor_backend_epoll;
     friend class reactor_backend_aio;
     friend class rdma::RDMAConnection;
+    friend class rdma::RDMAStack;
 public:
     class poller {
         std::unique_ptr<pollfn> _pollfn;
