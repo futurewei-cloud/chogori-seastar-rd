@@ -11,6 +11,7 @@
 #include <seastar/net/rdma.hh>
 #include <seastar/core/metrics_registration.hh> // metrics
 #include <seastar/core/metrics.hh>
+#include "core/thread_pool.hh"
 
 #include <arpa/inet.h>
 #include <infiniband/verbs.h>
@@ -32,7 +33,7 @@ static bool initialized = false;
 // TODO ref count RDMAStacks and free context?
 static struct ibv_context* ctx = nullptr;
 
-void RDMAConnection::makeQP() {
+future<> RDMAConnection::makeQP() {
     // A Reliable Connected (RC) QP has five states:
     // RESET: the state of a newly created QP
     // INIT: Receive requests can be posted, but no receives or
@@ -44,9 +45,6 @@ void RDMAConnection::makeQP() {
     // RESET->INIT->RTR->RTS using ibv_modify_qp without skipping states
     // see the ibv_modify_qp documentation for more info
 
-
-    // TODO move to slow core
-    // Create QP
     struct ibv_qp_init_attr init_attr = {
         .qp_context = nullptr,
         .send_cq = stack->RCCQ,
@@ -61,50 +59,78 @@ void RDMAConnection::makeQP() {
         .qp_type = IBV_QPT_RC,
         .sq_sig_all = 0
     };
-    QP = ibv_create_qp(stack->protectionDomain, &init_attr);
-    if (!QP) {
-        K2ERROR("Failed to create RC QP: " << strerror(errno));
-        shutdownConnection();
-        return;
-    }
 
-    // Transition QP to INIT state
-    struct ibv_qp_attr attr;
-    memset(&attr, 0, sizeof(ibv_qp_attr));
-    attr.qp_state = IBV_QPS_INIT;
-    attr.port_num = 1;
-    if (int err = ibv_modify_qp(QP, &attr, IBV_QP_STATE | IBV_QP_PKEY_INDEX |
-                                           IBV_QP_PORT | IBV_QP_ACCESS_FLAGS)) {
-        K2ERROR("failed to transition RC QP into init state: " << strerror(err));
-        shutdownConnection();
-        return;
-    }
-    // end of slow core part
+    return engine()._thread_pool->submit<struct ibv_qp*>([init_attr, PD=stack->protectionDomain]() mutable {
+        // Create QP
+        // For all ll ibv_* calls with attr (attribute) parameters, the attr is passed by pointer because 
+        // it is a C interface, but the struct does not need to live beyond the ibv_ call.
+        struct ibv_qp* QP = ibv_create_qp(PD, &init_attr);
+        if (!QP) {
+            K2ERROR("Failed to create RC QP: " << strerror(errno));
+            throw RDMAConnectionError();
+        }
 
-    if (stack->RCConnectionCount+1 > RDMAStack::maxExpectedConnections) {
-        K2WARN("CQ overrun possible");
-    }
-    stack->RCLookup[QP->qp_num] = weak_from_this();
+        // Transition QP to INIT state
+        struct ibv_qp_attr attr = {};
+        attr.qp_state = IBV_QPS_INIT;
+        attr.port_num = 1;
+        if (int err = ibv_modify_qp(QP, &attr, IBV_QP_STATE | IBV_QP_PKEY_INDEX |
+                                               IBV_QP_PORT | IBV_QP_ACCESS_FLAGS)) {
+            K2ERROR("failed to transition RC QP into init state: " << strerror(err));
+            throw RDMAConnectionError();
+        }
+
+        return QP;
+    }).
+    then([conn=weak_from_this()] (struct ibv_qp* newQP) {
+        if (!conn) {
+            ibv_destroy_qp(newQP);
+            return;
+        }
+
+        conn->QP = newQP;
+        if (conn->stack->RCConnectionCount+1 > RDMAStack::maxExpectedConnections) {
+            K2WARN("CQ overrun possible");
+        }
+        conn->stack->RCLookup[conn->QP->qp_num] = conn->weak_from_this();
+    }).
+    handle_exception([conn=weak_from_this()] (auto e) {
+        if (!conn) {
+            return;
+        }
+
+        conn->shutdownConnection();
+    });
 }
 
 void RDMAConnection::makeHandshakeRequest() {
-    makeQP();
-    K2DEBUG("MakeQP done");
-    if (!errorState) {
-        uint32_t id = stack->sendHandshakeRequest(remote, QP->qp_num);
-        stack->handshakeLookup[id] = weak_from_this();
-        K2DEBUG("Handshake request sent");
-    }
+    (void) makeQP().then([conn=weak_from_this()] () {
+        K2DEBUG("MakeQP done");
+        if (!conn) {
+            return;
+        }
+
+        if (!conn->errorState) {
+            uint32_t id = conn->stack->sendHandshakeRequest(conn->remote, conn->QP->qp_num);
+            conn->stack->handshakeLookup[id] = conn->weak_from_this();
+            K2DEBUG("Handshake request sent");
+        }
+    });
 }
 
 void RDMAConnection::processHandshakeRequest(uint32_t remoteQP, uint32_t responseId) {
-    makeQP();
-    K2DEBUG("MakeQP done");
-    if (!errorState) {
-        stack->sendHandshakeResponse(remote, QP->qp_num, responseId);
-        completeHandshake(remoteQP);
-        K2DEBUG("Handshake response sent");
-    }
+    (void) makeQP().then([conn=weak_from_this(), remoteQP, responseId] () {
+        if (!conn) {
+            return;
+        }
+
+        K2DEBUG("MakeQP done");
+        if (!conn->errorState) {
+            conn->stack->sendHandshakeResponse(conn->remote, conn->QP->qp_num, responseId);
+            K2DEBUG("Handshake response sent");
+            (void) conn->completeHandshake(remoteQP);
+        }
+    });
 }
 
 void RDMAStack::fillAHAttr(struct ibv_ah_attr& AHAttr, const union ibv_gid& GID) {
@@ -117,7 +143,7 @@ void RDMAStack::fillAHAttr(struct ibv_ah_attr& AHAttr, const union ibv_gid& GID)
     AHAttr.port_num = 1;
 }
 
-void RDMAConnection::completeHandshake(uint32_t remoteQP) {
+future<> RDMAConnection::completeHandshake(uint32_t remoteQP) {
     // A Reliable Connected (RC) QP has five states:
     // RESET: the state of a newly created QP
     // INIT: Receive requests can be posted, but no receives or
@@ -129,72 +155,84 @@ void RDMAConnection::completeHandshake(uint32_t remoteQP) {
     // RESET->INIT->RTR->RTS using ibv_modify_qp without skipping states
     // see the ibv_modify_qp documentation for more info
 
-    // TODO move this part to slow core
-    struct ibv_ah_attr AHAttr;
-    RDMAStack::fillAHAttr(AHAttr, remote.GID);
+    // This relies on the fact that QP deletion is also submitted to the 
+    // slow thread so that we know these modify_qp calls will be serialized
+    // with deletion.
+    return engine()._thread_pool->submit<int>([QP=this->QP, remote=this->remote, remoteQP]() {
+        struct ibv_ah_attr AHAttr;
+        RDMAStack::fillAHAttr(AHAttr, remote.GID);
 
-    // The timeout, rnr_retry, and min_rnr_timer values of ibv_qp_attr
-    // do not have specific units,
-    // e.g. the value assigned to timeout is an index into a lookup table
-    // of exponentially increasing values. See the ibv_modify_qp documentation
-    // for more info
-    // TODO implement an exponential backoff timeout/retry strategy in software
+        // The timeout, rnr_retry, and min_rnr_timer values of ibv_qp_attr
+        // do not have specific units,
+        // e.g. the value assigned to timeout is an index into a lookup table
+        // of exponentially increasing values. See the ibv_modify_qp documentation
+        // for more info
+        // TODO implement an exponential backoff timeout/retry strategy in software
 
-    // Transition QP to RTR state
-    struct ibv_qp_attr attr;
-    memset(&attr, 0, sizeof(ibv_qp_attr));
-    attr.qp_state = IBV_QPS_RTR;
-    attr.ah_attr = AHAttr;
-    attr.path_mtu = IBV_MTU_4096;
-    attr.dest_qp_num = remoteQP;
-    attr.rq_psn = 0;
-    attr.max_dest_rd_atomic = 0;
-    attr.min_rnr_timer = 1; // 0.01 millisecond
-    if (int err = ibv_modify_qp(QP, &attr, IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU |
-                                IBV_QP_RQ_PSN | IBV_QP_MAX_DEST_RD_ATOMIC |
-                                IBV_QP_MIN_RNR_TIMER | IBV_QP_DEST_QPN)) {
-        K2ERROR("failed to transition RC QP into RTR: " << strerror(err));
-        shutdownConnection();
-        return;
-    }
+        // Transition QP to RTR state
+        struct ibv_qp_attr attr = {};
+        attr.qp_state = IBV_QPS_RTR;
+        attr.ah_attr = AHAttr;
+        attr.path_mtu = IBV_MTU_4096;
+        attr.dest_qp_num = remoteQP;
+        attr.rq_psn = 0;
+        attr.max_dest_rd_atomic = 0;
+        attr.min_rnr_timer = 1; // 0.01 millisecond
+        if (int err = ibv_modify_qp(QP, &attr, IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU |
+                                    IBV_QP_RQ_PSN | IBV_QP_MAX_DEST_RD_ATOMIC |
+                                    IBV_QP_MIN_RNR_TIMER | IBV_QP_DEST_QPN)) {
+            K2ERROR("failed to transition RC QP into RTR: " << strerror(err));
+            throw RDMAConnectionError();
+        }
 
-    // Transition QP to RTS state
-    memset(&attr, 0, sizeof(ibv_qp_attr));
-    attr.qp_state = IBV_QPS_RTS;
-    attr.sq_psn = 0;
-    attr.timeout = 8; // ~1ms
-    attr.retry_cnt = 5;
-    attr.rnr_retry = 7;
-    attr.max_rd_atomic = 0;
-    if (int err = ibv_modify_qp(QP, &attr, IBV_QP_STATE | IBV_QP_SQ_PSN |
-                                IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT |
-                                IBV_QP_RNR_RETRY | IBV_QP_MAX_QP_RD_ATOMIC)) {
-        K2ERROR("failed to transition RC QP into RTS: " << strerror(err));
-        shutdownConnection();
-        return;
-    }
-    // End of slow core part
+        // Transition QP to RTS state
+        memset(&attr, 0, sizeof(ibv_qp_attr));
+        attr.qp_state = IBV_QPS_RTS;
+        attr.sq_psn = 0;
+        attr.timeout = 8; // ~1ms
+        attr.retry_cnt = 5;
+        attr.rnr_retry = 7;
+        attr.max_rd_atomic = 0;
+        if (int err = ibv_modify_qp(QP, &attr, IBV_QP_STATE | IBV_QP_SQ_PSN |
+                                    IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT |
+                                    IBV_QP_RNR_RETRY | IBV_QP_MAX_QP_RD_ATOMIC)) {
+            K2ERROR("failed to transition RC QP into RTS: " << strerror(err));
+            throw RDMAConnectionError();
+        }
 
-    // Prepare Send request data that does not change
-    for (int i=0; i<SendWRData::maxWR; ++i) {
-        struct ibv_send_wr& SR = sendWRs.SendRequests[i];
-        memset(&SR, 0, sizeof(struct ibv_send_wr));
-        // We need to use the wr_id to differentiate between sends and receives
-        // in the case of errors
-        SR.wr_id = i + RecvWRData::maxWR;
-        SR.num_sge = 1;
-        SR.opcode = IBV_WR_SEND;
+        return 0;
+    }).then([conn=weak_from_this()] (int) {
+        if (!conn) {
+            return;
+        }
 
-        sendWRs.Segments[i].lkey = stack->memRegionHandle->lkey;
-    }
+        // Prepare Send request data that does not change
+        for (int i=0; i<SendWRData::maxWR; ++i) {
+            struct ibv_send_wr& SR = conn->sendWRs.SendRequests[i];
+            memset(&SR, 0, sizeof(struct ibv_send_wr));
+            // We need to use the wr_id to differentiate between sends and receives
+            // in the case of errors
+            SR.wr_id = i + RecvWRData::maxWR;
+            SR.num_sge = 1;
+            SR.opcode = IBV_WR_SEND;
 
-    K2DEBUG("Handshake complete");
-    stack->RCConnectionCount++;
-    isReady = true;
+            conn->sendWRs.Segments[i].lkey = conn->stack->memRegionHandle->lkey;
+        }
 
-    size_t beforeSize = sendQueue.size();
-    processSends<std::deque<Buffer>>(sendQueue);
-    stack->sendQueueSize -= beforeSize - sendQueue.size();
+        K2DEBUG("Handshake complete");
+        conn->stack->RCConnectionCount++;
+        conn->isReady = true;
+
+        size_t beforeSize = conn->sendQueue.size();
+        conn->processSends<std::deque<Buffer>>(conn->sendQueue);
+        conn->stack->sendQueueSize -= beforeSize - conn->sendQueue.size();
+    }).handle_exception([conn=weak_from_this()] (auto e) {
+        if (!conn) {
+            return;
+        }
+
+        conn->shutdownConnection();
+    });
 }
 
 
@@ -387,18 +425,19 @@ void RDMAConnection::shutdownConnection() {
         K2WARN("Shutting down RC QP with pending sends");
     }
 
-    // TODO slow core
     if (QP) {
-        // Transitioning the QP into the Error state will flush
-        // any outstanding WRs, possibly with errors. Is needed to
-        // maintain consistency in the SRQ
-        struct ibv_qp_attr attr;
-        memset(&attr, 0, sizeof(ibv_qp_attr));
-        attr.qp_state = IBV_QPS_ERR;
-        ibv_modify_qp(QP, &attr, IBV_QP_STATE);
+        (void) engine()._thread_pool->submit<int>([QP=this->QP]() {
+            // Transitioning the QP into the Error state will flush
+            // any outstanding WRs, possibly with errors. Is needed to
+            // maintain consistency in the SRQ
+            struct ibv_qp_attr attr = {};
+            attr.qp_state = IBV_QPS_ERR;
 
-        ibv_destroy_qp(QP);
-        QP = nullptr;
+            ibv_modify_qp(QP, &attr, IBV_QP_STATE);
+            ibv_destroy_qp(QP);
+
+            return 0;
+        });
     }
 
     if (isReady) {
@@ -443,6 +482,10 @@ int initRDMAContext(const std::string& RDMADeviceName) {
 
     ctx = ibv_open_device(devices[deviceIdx]);
     K2ASSERT(ctx, "ibv_open_device failed");
+
+    struct ibv_device_attr attr;
+    ibv_query_device(ctx, &attr);
+    K2DEBUG("RDMA maximum queue pairs: " << attr.max_qp);
 
     ibv_free_device_list(devices);
 
@@ -517,35 +560,47 @@ uint32_t RDMAStack::sendHandshakeRequest(const EndPoint& endpoint, uint32_t QPNu
     return id;
 }
 
-struct ibv_ah* RDMAStack::makeAH(const union ibv_gid& GID) {
-    struct ibv_ah_attr AHAttr;
-    fillAHAttr(AHAttr, GID);
+future<struct ibv_ah*> RDMAStack::getAH(const union ibv_gid& GID) {
+    auto AHIt = AHLookup.find(GID);
+    if (AHIt != AHLookup.end()) {
+        return make_ready_future<struct ibv_ah*>(AHIt->second);
+    }
 
-    struct ibv_ah* AH = ibv_create_ah(protectionDomain, &AHAttr);
-    K2ASSERT(AH, "Failed to create AH");
+    return engine()._thread_pool->submit<struct ibv_ah*>([GID, stack=weak_from_this()]() {
+        struct ibv_ah* AH = nullptr;
+        if (!stack) {
+            return AH;
+        }
 
-    AHLookup[GID] = AH;
-    return AH;
+        struct ibv_ah_attr AHAttr;
+        fillAHAttr(AHAttr, GID);
+
+        AH = ibv_create_ah(stack->protectionDomain, &AHAttr);
+        if (!AH) {
+            return AH;
+        }
+
+        stack->AHLookup[GID] = AH;
+        return AH;
+    });
 }
 
 int RDMAStack::sendUDQPMessage(Buffer buffer, const union ibv_gid& destGID, uint32_t destQP) {
     K2ASSERT(buffer.size() + UDDataOffset <= UDQPRxSize, "UD Message too large");
 
-    auto AHIt = AHLookup.find(destGID);
-    struct ibv_ah* AH = nullptr;
-    if (AHIt == AHLookup.end()) {
-        // TODO move to slow core
-        AH = makeAH(destGID);
-    } else {
-        AH = AHIt->second;
-    }
+    (void) getAH(destGID).then([destQP, buff=std::move(buffer), stack=weak_from_this()] (struct ibv_ah* AH) mutable {
+        if (!stack || !AH) {
+            K2WARN("Failed to create RDMA address handle!");
+            return;
+        }
 
-    int idx = trySendUDQPMessage(buffer, AH, destQP);
-    if (idx < 0) {
-        UDSendQueue.emplace_back(std::move(buffer), AH, destQP);
-    } else {
-        UDOutstandingBuffers[idx] = std::move(buffer);
-    }
+        int idx = stack->trySendUDQPMessage(buff, AH, destQP);
+        if (idx < 0) {
+            stack->UDSendQueue.emplace_back(std::move(buff), AH, destQP);
+        } else {
+            stack->UDOutstandingBuffers[idx] = std::move(buff);
+        }
+    });
 
     return 0;
 }
@@ -661,10 +716,10 @@ future<std::unique_ptr<RDMAConnection>> RDMAStack::accept() {
     return acceptPromise.get_future();
 }
 
-future<std::unique_ptr<RDMAConnection>> RDMAStack::connect(const EndPoint& remote) {
+std::unique_ptr<RDMAConnection> RDMAStack::connect(const EndPoint& remote) {
     std::unique_ptr<RDMAConnection> conn = std::make_unique<RDMAConnection>(this, remote);
     conn->makeHandshakeRequest();
-    return make_ready_future<std::unique_ptr<RDMAConnection>>(std::move(conn));
+    return std::move(conn);
 }
 
 void RDMAStack::processUDMessage(UDMessage* message, EndPoint remote) {
@@ -680,7 +735,8 @@ void RDMAStack::processUDMessage(UDMessage* message, EndPoint remote) {
             acceptQueue.push_back(std::move(conn));
         }
     } else if (message->op == UDOps::HandshakeResponse) {
-        auto connIt = handshakeLookup.find(message->requestId);
+        uint32_t id = message->requestId;
+        auto connIt = handshakeLookup.find(id);
         if (connIt == handshakeLookup.end()) {
             K2WARN("Unsolicited Handshake response");
             return;
@@ -691,8 +747,13 @@ void RDMAStack::processUDMessage(UDMessage* message, EndPoint remote) {
             return;
         }
 
-        connIt->second->completeHandshake(message->QPNum);
-        handshakeLookup.erase(connIt);
+        (void) connIt->second->completeHandshake(message->QPNum).
+        then([this, id] () {
+            auto eraseIt = handshakeLookup.find(id);
+            if (eraseIt != handshakeLookup.end()) {
+                handshakeLookup.erase(eraseIt);
+            }
+        });
     } else {
         K2ASSERT(false, "Unknown UD op");
     }
