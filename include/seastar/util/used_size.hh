@@ -15,46 +15,22 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-
 /*
- * Copyright (C) 2014 Cloudius Systems, Ltd.
+ * Copyright (C) 2020 ScyllaDB Ltd.
  */
 
 #pragma once
 
-#include <vector>
-
-#include <boost/test/unit_test.hpp>
-
-#include <seastar/core/future.hh>
-
-#include <seastar/testing/entry_point.hh>
+#include <stddef.h>
+#include <type_traits>
 
 namespace seastar {
-
-namespace testing {
-
-class seastar_test {
-public:
-    seastar_test();
-    virtual ~seastar_test() {}
-    virtual const char* get_test_file() = 0;
-    virtual const char* get_name() = 0;
-    virtual int get_expected_failures() { return 0; }
-    virtual future<> run_test_case() = 0;
-    void run();
+namespace internal {
+// Empty types have a size of 1, but that byte is not actually
+// used. This helper is used to avoid accessing that byte.
+template<typename T>
+struct used_size {
+    static constexpr size_t value = std::is_empty<T>::value ? 0 : sizeof(T);
 };
-
-const std::vector<seastar_test*>& known_tests();
-
 }
-
 }
-
-#ifdef SEASTAR_TESTING_MAIN
-
-int main(int argc, char** argv) {
-    return seastar::testing::entry_point(argc, argv);
-}
-
-#endif // SEASTAR_TESTING_MAIN

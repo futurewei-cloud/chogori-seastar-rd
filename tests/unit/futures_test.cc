@@ -75,6 +75,36 @@ SEASTAR_TEST_CASE(test_self_move) {
 #pragma clang diagnostic pop
 #endif
 
+static subscription<int> get_empty_subscription(std::function<future<> (int)> func) {
+    stream<int> s;
+    auto ret = s.listen(func);
+    s.close();
+    return ret;
+}
+
+SEASTAR_TEST_CASE(test_stream) {
+    auto sub = get_empty_subscription([](int x) {
+        return make_ready_future<>();
+    });
+    return sub.done();
+}
+
+SEASTAR_TEST_CASE(test_stream_drop_sub) {
+    auto s = make_lw_shared<stream<int>>();
+    compat::optional<future<>> ret;
+    {
+        auto sub = s->listen([](int x) {
+            return make_ready_future<>();
+        });
+        *ret = sub.done();
+        // It is ok to drop the subscription when we only want the competition future.
+    }
+    return s->produce(42).then([ret = std::move(*ret), s] () mutable {
+        s->close();
+        return std::move(ret);
+    });
+}
+
 SEASTAR_TEST_CASE(test_set_future_state_with_tuple) {
     future_state<int> s1;
     promise<int> p1;
@@ -937,6 +967,27 @@ SEASTAR_TEST_CASE(test_with_timeout_when_it_times_out) {
 
         pr.set_value();
     });
+}
+
+SEASTAR_THREAD_TEST_CASE(test_shared_future_get_future_after_timeout) {
+    // This used to crash because shared_future checked if the list of
+    // pending futures was empty to decide if it had already called
+    // then_wrapped. If all pending futures timed out, it would call
+    // it again.
+    promise<> pr;
+    shared_future<with_clock<manual_clock>> sfut(pr.get_future());
+    future<> fut1 = sfut.get_future(manual_clock::now() + 1s);
+
+    manual_clock::advance(1s);
+
+    check_timed_out(std::move(fut1));
+
+    future<> fut2 = sfut.get_future(manual_clock::now() + 1s);
+    manual_clock::advance(1s);
+    check_timed_out(std::move(fut2));
+
+    future<> fut3 = sfut.get_future(manual_clock::now() + 1s);
+    pr.set_value();
 }
 
 SEASTAR_TEST_CASE(test_custom_exception_factory_in_with_timeout) {

@@ -147,7 +147,7 @@ private:
             if (!_original_future.available()) {
                 promise_type p;
                 auto f = p.get_future();
-                if (_peers.empty()) {
+                if (_original_future._state.valid()) {
                     // _original_future's result is forwarded to each peer.
                     (void)_original_future.then_wrapped([s = this->shared_from_this()] (future_type&& f) mutable {
                         s->resolve(std::move(f));
@@ -156,7 +156,7 @@ private:
                 _peers.push_back(std::move(p), timeout);
                 return f;
             } else if (_original_future.failed()) {
-                return future_type(exception_future_marker(), _original_future._state.get_exception());
+                return future_type(exception_future_marker(), std::exception_ptr(_original_future._state.get_exception()));
             } else {
                 try {
                     return future_type(ready_future_marker(), _original_future._state.get_value());

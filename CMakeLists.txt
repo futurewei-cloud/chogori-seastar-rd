@@ -246,6 +246,24 @@ set (Seastar_TEST_TIMEOUT
   STRING
   "Maximum allowed time for a test to run, in seconds.")
 
+# We set the following environment variables
+# * ASAN_OPTIONS=disable_coredump=0:abort_on_error=1
+#   By default asan disables core dumps because they used to be
+#   huge. This is no longer the case since the shadow memory is
+#   excluded, so it is safe to enable them.
+# * UBSAN_OPTIONS=halt_on_error=1:abort_on_error=1
+#   Fail the test if any undefined behavior is found and use abort
+#   instead of exit. Using abort is what causes core dumps to be
+#   produced.
+# * BOOST_TEST_CATCH_SYSTEM_ERRORS=no
+#   Normally the boost test library handles SIGABRT and prevents core
+#   dumps from being produced.
+set (Seastar_TEST_ENVIRONMENT
+  "ASAN_OPTIONS=disable_coredump=0:abort_on_error=1;UBSAN_OPTIONS=halt_on_error=1:abort_on_error=1;BOOST_TEST_CATCH_SYSTEM_ERRORS=no"
+  CACHE
+  STRING
+  "Environment variables for running tests")
+
 option (Seastar_UNUSED_RESULT_ERROR
   "Make [[nodiscard]] violations an error (instead of a warning)."
   OFF)
@@ -578,6 +596,7 @@ add_library (seastar STATIC
   src/core/file-impl.hh
   src/core/fsqual.cc
   src/core/fstream.cc
+  src/core/future.cc
   src/core/future-util.cc
   src/core/linux-aio.cc
   src/core/memory.cc
@@ -885,7 +904,12 @@ if ((CMAKE_BUILD_TYPE STREQUAL "Debug") OR (CMAKE_BUILD_TYPE STREQUAL "Sanitize"
       SEASTAR_DEBUG
       SEASTAR_DEFAULT_ALLOCATOR
       SEASTAR_DEBUG_SHARED_PTR
-      SEASTAR_SHUFFLE_TASK_QUEUE
+      SEASTAR_SHUFFLE_TASK_QUEUE)
+endif ()
+
+if ((CMAKE_BUILD_TYPE STREQUAL "Debug") OR (CMAKE_BUILD_TYPE STREQUAL "Sanitize") OR (CMAKE_BUILD_TYPE STREQUAL "Dev"))
+  target_compile_definitions (seastar
+    PUBLIC
       SEASTAR_THREAD_STACK_GUARDS)
 endif ()
 

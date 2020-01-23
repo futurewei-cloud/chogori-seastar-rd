@@ -194,7 +194,7 @@ public:
         std::unique_ptr<pollfn> _pollfn;
         class registration_task;
         class deregistration_task;
-        registration_task* _registration_task;
+        registration_task* _registration_task = nullptr;
     public:
         template <typename Func> // signature: bool ()
         static poller simple(Func&& poll) {
@@ -207,7 +207,7 @@ public:
         ~poller();
         poller(poller&& x);
         poller& operator=(poller&& x);
-        void do_register();
+        void do_register() noexcept;
         friend class reactor;
     };
     enum class idle_cpu_handler_result {
@@ -253,6 +253,19 @@ private:
     static constexpr unsigned max_queues = 8;
     static constexpr unsigned max_aio = max_aio_per_queue * max_queues;
     friend disk_config_params;
+
+
+    class iocb_pool {
+        alignas(cache_line_size) std::array<internal::linux_abi::iocb, max_aio> _iocb_pool;
+        semaphore _sem{0};
+        std::stack<internal::linux_abi::iocb*, boost::container::static_vector<internal::linux_abi::iocb*, max_aio>> _free_iocbs;
+    public:
+        iocb_pool();
+        future<internal::linux_abi::iocb*> get_one();
+        void put_one(internal::linux_abi::iocb* io);
+        unsigned outstanding() const;
+    };
+
     // Not all reactors have IO queues. If the number of IO queues is less than the number of shards,
     // some reactors will talk to foreign io_queues. If this reactor holds a valid IO queue, it will
     // be stored here.
@@ -264,9 +277,10 @@ private:
     unsigned _id = 0;
     bool _stopping = false;
     bool _stopped = false;
+    bool _finished_running_tasks = false;
     condition_variable _stop_requested;
     bool _handle_sigint = true;
-    std::optional<future<std::unique_ptr<network_stack>>> _network_stack_ready;
+    compat::optional<future<std::unique_ptr<network_stack>>> _network_stack_ready;
     int _return = 0;
     promise<> _start_promise;
     semaphore _cpu_started;
@@ -283,13 +297,13 @@ private:
     timer_set<timer<manual_clock>, &timer<manual_clock>::_link> _manual_timers;
     timer_set<timer<manual_clock>, &timer<manual_clock>::_link>::timer_list_t _expired_manual_timers;
     internal::linux_abi::aio_context_t _io_context;
-    alignas(cache_line_size) std::array<internal::linux_abi::iocb, max_aio> _iocb_pool;
-    std::stack<internal::linux_abi::iocb*, boost::container::static_vector<internal::linux_abi::iocb*, max_aio>> _free_iocbs;
+    iocb_pool _iocb_pool;
     boost::container::static_vector<internal::linux_abi::iocb*, max_aio> _pending_aio;
     boost::container::static_vector<internal::linux_abi::iocb*, max_aio> _pending_aio_retry;
     io_stats _io_stats;
     uint64_t _fsyncs = 0;
     uint64_t _cxx_exceptions = 0;
+    uint64_t _abandoned_failed_futures = 0;
     struct task_queue {
         explicit task_queue(unsigned id, sstring name, float shares);
         int64_t _vruntime = 0;
@@ -300,7 +314,7 @@ private:
         uint8_t _id;
         sched_clock::duration _runtime = {};
         uint64_t _tasks_processed = 0;
-        circular_buffer<std::unique_ptr<task>> _q;
+        circular_buffer<task*> _q;
         sstring _name;
         /**
          * This array holds pointers to the scheduling group specific
@@ -559,10 +573,10 @@ public:
     }
 
 #ifdef SEASTAR_SHUFFLE_TASK_QUEUE
-    void shuffle(std::unique_ptr<task>&, task_queue&);
+    void shuffle(task*&, task_queue&);
 #endif
 
-    void add_task(std::unique_ptr<task>&& t) {
+    void add_task(task* t) noexcept {
         auto sg = t->group();
         auto* q = _task_queues[sg._id].get();
         bool was_empty = q->_q.empty();
@@ -574,7 +588,7 @@ public:
             activate(*q);
         }
     }
-    void add_urgent_task(std::unique_ptr<task>&& t) {
+    void add_urgent_task(task* t) noexcept {
         auto sg = t->group();
         auto* q = _task_queues[sg._id].get();
         bool was_empty = q->_q.empty();
@@ -600,7 +614,7 @@ public:
     }
     void force_poll();
 
-    void add_high_priority_task(std::unique_ptr<task>&&);
+    void add_high_priority_task(task*) noexcept;
 
     network_stack& net() { return *_network_stack; }
     shard_id cpu_id() const { return _id; }
@@ -613,6 +627,7 @@ public:
     std::chrono::nanoseconds total_steal_time();
 
     const io_stats& get_io_stats() const { return _io_stats; }
+    uint64_t abandoned_failed_futures() const { return _abandoned_failed_futures; }
 #ifdef HAVE_OSV
     void timer_thread_func();
     void set_timer(sched::timer &tmr, s64 t);
@@ -663,6 +678,7 @@ private:
     friend class scheduling_group;
     friend void add_to_flush_poller(output_stream<char>* os);
     friend int ::_Unwind_RaiseException(struct _Unwind_Exception *h);
+    friend void report_failed_future(const std::exception_ptr& eptr) noexcept;
     metrics::metric_groups _metric_groups;
     friend future<scheduling_group> create_scheduling_group(sstring name, float shares);
     friend future<> seastar::destroy_scheduling_group(scheduling_group);
@@ -756,7 +772,7 @@ size_t iovec_len(const iovec* begin, size_t len)
     return ret;
 }
 
-inline int alarm_signal() {
+inline int hrtimer_signal() {
     // We don't want to use SIGALRM, because the boost unit test library
     // also plays with it.
     return SIGRTMIN;

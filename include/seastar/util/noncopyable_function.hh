@@ -21,6 +21,8 @@
 
 #pragma once
 
+#include <seastar/util/used_size.hh>
+
 #include <utility>
 #include <type_traits>
 #include <functional>
@@ -105,7 +107,7 @@ private:
         static constexpr move_type select_move_thunk() {
             bool can_trivially_move = std::is_trivially_move_constructible<Func>::value
                     && std::is_trivially_destructible<Func>::value;
-            return can_trivially_move ? trivial_direct_move<sizeof(Func)> : move;
+            return can_trivially_move ? trivial_direct_move<internal::used_size<Func>::value> : move;
         }
         static void destroy(noncopyable_function_base* func) {
             access(func)->~Func();
