@@ -379,6 +379,10 @@ void RDMAConnection::send(std::vector<Buffer>&& buf) {
         auto it = buf.begin();
         for (; it != buf.end(); ++it) {
             if (it->size() > messagePackThreshold) {
+                if (sendQueueTailBytesLeft > 0) {
+                    sendQueue.back().trim(RDMAStack::RCDataSize-sendQueueTailBytesLeft);
+                    sendQueueTailBytesLeft = 0;
+                }
                 break;
             }
 
