@@ -258,6 +258,7 @@ private:
     seastar::metrics::metric_groups metricGroup;
 
     friend class RDMAConnection;
+    friend class RDMAListener;
 };
 
 class RDMAListener {
@@ -270,6 +271,10 @@ public:
         return _rstack->accept();
     }
     future<> close() {
+        if (_rstack->acceptPromiseActive) {
+            _rstack->acceptPromiseActive = false;
+            _rstack->acceptPromise.set_exception(std::runtime_error("Shutting down accept promise on listener close"));
+        }
         return make_ready_future<>();
     }
 private:

@@ -338,11 +338,12 @@ void RDMAConnection::processSends(VecType& queue) {
 
 future<Buffer> RDMAConnection::recv() {
     if (errorState) {
-        return make_exception_future<Buffer>(RDMAConnectionError());
+        return make_ready_future<Buffer>(Buffer());
     }
+
     if (recvPromiseActive) {
         K2ASSERT(false, "recv() called with promise already active");
-        throw RDMAConnectionError();
+        return make_exception_future<Buffer>(std::runtime_error("recv() called with promise already active"));
     }
 
     if (recvQueue.size()) {
@@ -418,11 +419,15 @@ void RDMAConnection::send(std::vector<Buffer>&& buf) {
 }
 
 void RDMAConnection::shutdownConnection() {
+    if (errorState) {
+        return;
+    }
+
     errorState = true;
 
     if (recvPromiseActive) {
         recvPromiseActive = false;
-        recvPromise.set_exception(RDMAConnectionError());
+        recvPromise.set_value(Buffer());
     }
 
     if (sendQueue.size()) {
@@ -442,6 +447,7 @@ void RDMAConnection::shutdownConnection() {
 
             return 0;
         });
+        QP = nullptr;
     }
 
     if (isReady) {
@@ -533,7 +539,7 @@ RDMAStack::~RDMAStack() {
     }
 
     if (acceptPromiseActive) {
-        acceptPromise.set_exception(RDMAConnectionError());
+        acceptPromise.set_exception(std::runtime_error("RDMAStack destroyed with accept promise active"));
     }
 
     for (int i=0; i<RecvWRData::maxWR; ++i) {
@@ -706,7 +712,7 @@ void RDMAStack::processCompletedSRs(std::array<Buffer, SendWRData::maxWR>& buffe
 
 future<std::unique_ptr<RDMAConnection>> RDMAStack::accept() {
     if (acceptPromiseActive) {
-        throw RDMAConnectionError();
+        return make_exception_future<std::unique_ptr<RDMAConnection>>(std::runtime_error("accept() called while accept future still active"));
     }
 
     if (acceptQueue.size()) {
