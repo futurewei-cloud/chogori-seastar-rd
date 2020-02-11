@@ -65,6 +65,14 @@ app_template::app_template(app_template::config cfg)
 
 app_template::configuration_reader app_template::get_default_configuration_reader() {
     return [this] (bpo::variables_map& configuration) {
+        auto config_file = std::getenv("CONFIG_FILE");
+        if (config_file) {
+            std::ifstream ifs = std::ifstream(std::string(config_file));
+            if (ifs) {
+                bpo::store(bpo::parse_config_file(ifs, _opts), configuration);
+            }
+        }
+
         auto home = std::getenv("HOME");
         if (home) {
             std::ifstream ifs(std::string(home) + "/.config/seastar/seastar.conf");
