@@ -64,6 +64,18 @@ public:
         t._queued = false;
         t._armed = false;
     }
+    timer& operator=(timer&& t) noexcept {
+        _callback = std::move(t._callback);
+        _expiry = std::move(t._expiry);
+        _period = std::move(t._period);
+        _armed = t._armed;
+        _queued = t._queued;
+        _expired = t._expired;
+        _link.swap_nodes(t._link);
+        t._queued = false;
+        t._armed = false;
+        return *this;
+    }
     explicit timer(callback_t&& callback) : _callback{std::move(callback)} {
     }
     ~timer();
