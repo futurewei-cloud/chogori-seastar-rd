@@ -271,7 +271,7 @@ public:
         return _rstack->accept();
     }
     future<> close() {
-        if (_rstack->acceptPromiseActive) {
+        if (_rstack && _rstack->acceptPromiseActive) {
             _rstack->acceptPromiseActive = false;
             _rstack->acceptPromise.set_exception(std::runtime_error("Shutting down accept promise on listener close"));
         }
