@@ -16,6 +16,7 @@
 # specific language governing permissions and limitations
 # under the License.
 #
+set -e
 
 # os-release may be missing in container environment by default.
 if [ -f "/etc/os-release" ]; then
@@ -52,7 +53,6 @@ debian_packages=(
     libc-ares-dev
     stow
     g++
-    libfmt-dev
     diffutils
 )
 
@@ -93,7 +93,6 @@ fedora_packages=(
     ninja-build
     ragel
     boost-devel
-    fmt-devel
     libubsan
     libasan
     libatomic
@@ -140,7 +139,6 @@ arch_packages=(
     stow
     c-ares
     pkgconf
-    fmt
     python3
     glibc
     filesystem
@@ -202,3 +200,16 @@ else
     echo "Your system ($ID) is not supported by this script. Please install dependencies manually."
     exit 1
 fi
+
+mkdir -p deps
+cd deps
+if [ ! -d "fmt" ]; then git clone https://github.com/fmtlib/fmt.git; fi
+
+cd fmt
+git checkout 6.1.2
+mkdir -p build
+cd build
+cmake ..
+make -j
+make install
+

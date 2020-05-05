@@ -1,6 +1,23 @@
-//
-//  (C)opyright Futurewei Technologies Inc, 2019
-//
+/*
+ * This file is open source software, licensed to you under the terms
+ * of the Apache License, Version 2.0 (the "License").  See the NOTICE file
+ * distributed with this work for additional information regarding copyright
+ * ownership.  You may not use this file except in compliance with the License.
+ *
+ * You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+/*
+ * Copyright Futurewei Technologies Inc, 2020
+ */
 
 #include <iostream>
 #include <algorithm>
@@ -62,7 +79,7 @@ future<> RDMAConnection::makeQP() {
 
     return engine()._thread_pool->submit<struct ibv_qp*>([init_attr, PD=stack->protectionDomain]() mutable {
         // Create QP
-        // For all ll ibv_* calls with attr (attribute) parameters, the attr is passed by pointer because 
+        // For all ll ibv_* calls with attr (attribute) parameters, the attr is passed by pointer because
         // it is a C interface, but the struct does not need to live beyond the ibv_ call.
         struct ibv_qp* QP = ibv_create_qp(PD, &init_attr);
         if (!QP) {
@@ -155,7 +172,7 @@ future<> RDMAConnection::completeHandshake(uint32_t remoteQP) {
     // RESET->INIT->RTR->RTS using ibv_modify_qp without skipping states
     // see the ibv_modify_qp documentation for more info
 
-    // This relies on the fact that QP deletion is also submitted to the 
+    // This relies on the fact that QP deletion is also submitted to the
     // slow thread so that we know these modify_qp calls will be serialized
     // with deletion.
     return engine()._thread_pool->submit<int>([QP=this->QP, remote=this->remote, remoteQP]() {
