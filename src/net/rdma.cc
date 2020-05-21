@@ -746,7 +746,7 @@ future<std::unique_ptr<RDMAConnection>> RDMAStack::accept() {
 std::unique_ptr<RDMAConnection> RDMAStack::connect(const EndPoint& remote) {
     std::unique_ptr<RDMAConnection> conn = std::make_unique<RDMAConnection>(this, remote);
     conn->makeHandshakeRequest();
-    return std::move(conn);
+    return conn;
 }
 
 void RDMAStack::processUDMessage(UDMessage* message, EndPoint remote) {
