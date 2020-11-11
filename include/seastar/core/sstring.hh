@@ -587,6 +587,15 @@ public:
     bool operator<(const basic_sstring& x) const {
         return compare(x) < 0;
     }
+    bool operator<=(const basic_sstring& x) const {
+        return compare(x) <= 0;
+    }
+    bool operator>(const basic_sstring& x) const {
+        return compare(x) > 0;
+    }
+    bool operator>=(const basic_sstring& x) const {
+        return compare(x) >= 0;
+    }
     basic_sstring operator+(const basic_sstring& x) const {
         basic_sstring ret(initialized_later(), size() + x.size());
         std::copy(begin(), end(), ret.begin());
