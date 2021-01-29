@@ -50,6 +50,66 @@ namespace seastar {
 /// on the same lcore; failing to do so carries a severe performance
 /// penalty.  It is possible to share memory with another core, but this
 /// should be limited to avoid cache coherency traffic.
+/// You can obtain the memory layout of the current shard with
+/// \ref get_memory_layout().
+///
+/// ## Critical allocation scopes
+///
+/// Seastar supports marking scopes as critical allocation scopes for the purpose
+/// of special treatment from various memory related utilities.
+/// See \ref scoped_critical_alloc_section.
+///
+/// ## Diagnostics and debugging features
+///
+/// ### Allocation failure injector
+///
+/// Allows injecting allocation failures for testing resiliency against
+/// allocation failures, or exceptions in general. See:
+/// * \ref alloc_failure_injector
+/// * \ref with_allocation_failures()
+///
+/// ### Large allocation warning
+///
+/// Large allocations put great pressure on the allocator which might be unable
+/// to serve them even if there is enough memory available, due to memory
+/// fragmentation. This is especially relevant for long-running applications,
+/// the kind of applications that are typically built with seastar. This feature
+/// allows finding these large by logging a warning on large allocations, with
+/// the stacktrace of the. See:
+/// * \ref set_large_allocation_warning_threshold()
+/// * \ref get_large_allocation_warning_threshold()
+/// * \ref scoped_large_allocation_warning_threshold
+/// * \ref scoped_large_allocation_warning_disable
+///
+/// ### Heap profiling
+///
+/// Heap profiling allows finding out how memory is used by your application, by
+/// recording the stacktrace of all allocations. See:
+/// * \ref set_heap_profiling_enabled()
+/// * \ref scoped_heap_profiling
+///
+/// ### Abort on allocation failure
+///
+/// Often, the best way to debug an allocation failure is a coredump. This
+/// feature allows dumping core on allocation failures, containing the stack of
+/// the failed allocation, by means of aborting. To enable set the
+/// `abort_on_seastar_bad_alloc` configuration option or the respective command
+/// line flag.
+///
+/// ### Dump diagnostics report
+///
+/// Dump a diagnostic report of the state of the seastar allocator upon allocation
+/// failure. The report is dumped with the `seastar_memory` logger, with debug
+/// level.
+/// You can configure a report to be dumped with error level on certain allocation
+/// kinds, see:
+/// * set_dump_memory_diagnostics_on_alloc_failure_kind()
+/// * set_additional_diagnostics_producer()
+/// * generate_memory_diagnostics_report()
+///
+/// The diagnostics report dump can be configured with the command
+/// line/configuration file via the \p dump-memory-diagnostics-on-alloc-failure-kind
+/// command-line flag/configuration item.
 namespace memory {
 
 /// \cond internal
@@ -86,7 +146,15 @@ public:
     ~disable_abort_on_alloc_failure_temporarily() noexcept;
 };
 
-void set_heap_profiling_enabled(bool);
+// Disables heap profiling as long as this object is alive.
+// Can be nested, in which case the profiling is re-enabled when all
+// the objects go out of scope.
+class disable_backtrace_temporarily {
+    bool _old;
+public:
+    disable_backtrace_temporarily();
+    ~disable_backtrace_temporarily();
+};
 
 enum class reclaiming_result {
     reclaimed_nothing,
@@ -134,7 +202,7 @@ public:
     reclaimer_scope scope() const { return _scope; }
 };
 
-extern compat::polymorphic_allocator<char>* malloc_allocator;
+extern std::pmr::polymorphic_allocator<char>* malloc_allocator;
 
 // Call periodically to recycle objects that were freed
 // on cpu other than the one they were allocated on.
@@ -168,11 +236,18 @@ class statistics {
     size_t _free_memory;
     uint64_t _reclaims;
     uint64_t _large_allocs;
+
+    uint64_t _foreign_mallocs;
+    uint64_t _foreign_frees;
+    uint64_t _foreign_cross_frees;
 private:
     statistics(uint64_t mallocs, uint64_t frees, uint64_t cross_cpu_frees,
-            uint64_t total_memory, uint64_t free_memory, uint64_t reclaims, uint64_t large_allocs)
+            uint64_t total_memory, uint64_t free_memory, uint64_t reclaims, uint64_t large_allocs,
+            uint64_t foreign_mallocs, uint64_t foreign_frees, uint64_t foreign_cross_frees)
         : _mallocs(mallocs), _frees(frees), _cross_cpu_frees(cross_cpu_frees)
-        , _total_memory(total_memory), _free_memory(free_memory), _reclaims(reclaims), _large_allocs(large_allocs) {}
+        , _total_memory(total_memory), _free_memory(free_memory), _reclaims(reclaims), _large_allocs(large_allocs)
+        , _foreign_mallocs(foreign_mallocs), _foreign_frees(foreign_frees)
+        , _foreign_cross_frees(foreign_cross_frees) {}
 public:
     /// Total number of memory allocations calls since the system was started.
     uint64_t mallocs() const { return _mallocs; }
@@ -193,6 +268,12 @@ public:
     uint64_t reclaims() const { return _reclaims; }
     /// Number of allocations which violated the large allocation threshold
     uint64_t large_allocations() const { return _large_allocs; }
+    /// Number of foreign allocations
+    uint64_t foreign_mallocs() const { return _foreign_mallocs; }
+    /// Number of foreign frees
+    uint64_t foreign_frees() const { return _foreign_frees; }
+    /// Number of foreign frees on reactor threads
+    uint64_t foreign_cross_frees() const { return _foreign_cross_frees; }
     friend statistics stats();
 };
 
@@ -261,6 +342,30 @@ public:
     }
     void operator=(const scoped_large_allocation_warning_disable&) const = delete;
     void operator=(scoped_large_allocation_warning_disable&&) = delete;
+};
+
+/// Enable/disable heap profiling.
+///
+/// In order to use heap profiling you have to define
+/// `SEASTAR_HEAPPROF`.
+/// Heap profiling data is not currently exposed via an API for
+/// inspection, instead it was designed to be inspected from a
+/// debugger.
+/// For an example script that makes use of the heap profiling data
+/// see [scylla-gdb.py] (https://github.com/scylladb/scylla/blob/e1b22b6a4c56b4f1d0adf65d1a11db4bcb51fe7d/scylla-gdb.py#L1439)
+/// This script can generate either textual representation of the data,
+/// or a zoomable flame graph ([flame graph generation instructions](https://github.com/scylladb/scylla/wiki/Seastar-heap-profiler),
+/// [example flame graph](https://user-images.githubusercontent.com/1389273/72920437-f0cf8a80-3d51-11ea-92f0-f3dbeb698871.png)).
+void set_heap_profiling_enabled(bool);
+
+/// Enable heap profiling for the duration of the scope.
+///
+/// For more information about heap profiling see
+/// \ref set_heap_profiling_enabled().
+class scoped_heap_profiling {
+public:
+    scoped_heap_profiling() noexcept;
+    ~scoped_heap_profiling();
 };
 
 }

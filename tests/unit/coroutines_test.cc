@@ -19,11 +19,20 @@
  * Copyright (C) 2019 ScyllaDB Ltd.
  */
 
-#include <seastar/core/coroutine.hh>
 #include <seastar/core/future-util.hh>
 #include <seastar/testing/test_case.hh>
 
 using namespace seastar;
+
+#ifndef SEASTAR_COROUTINES_ENABLED
+
+SEASTAR_TEST_CASE(test_coroutines_not_compiled_in) {
+    return make_ready_future<>();
+}
+
+#else
+
+#include <seastar/core/coroutine.hh>
 
 namespace {
 
@@ -42,7 +51,7 @@ future<int> ready_coroutine() {
     co_return 64;
 }
 
-future<int, double> tuple_coroutine() {
+future<std::tuple<int, double>> tuple_coroutine() {
     co_return std::tuple(1, 2.);
 }
 
@@ -62,7 +71,7 @@ SEASTAR_TEST_CASE(test_simple_coroutines) {
 }
 
 SEASTAR_TEST_CASE(test_abandond_coroutine) {
-    compat::optional<future<int>> f;
+    std::optional<future<int>> f;
     {
         auto p1 = promise<>();
         auto p2 = promise<>();
@@ -91,7 +100,9 @@ SEASTAR_TEST_CASE(test_scheduling_group) {
 
     BOOST_REQUIRE(current_scheduling_group() == default_scheduling_group());
     auto f_ret = with_scheduling_group(other_sg,
-            [other_sg] (future<> f1, future<> f2, promise<> p1, promise<> p2) -> future<int> {
+            [other_sg_cap = other_sg] (future<> f1, future<> f2, promise<> p1, promise<> p2) -> future<int> {
+        // Make a copy in the coroutine before the lambda is destroyed.
+        auto other_sg = other_sg_cap;
         BOOST_REQUIRE(current_scheduling_group() == other_sg);
         BOOST_REQUIRE(other_sg == other_sg);
         p1.set_value();
@@ -112,3 +123,25 @@ SEASTAR_TEST_CASE(test_scheduling_group) {
     BOOST_REQUIRE_EQUAL(co_await std::move(f_ret), 42);
     BOOST_REQUIRE(current_scheduling_group() == default_scheduling_group());
 }
+
+SEASTAR_TEST_CASE(test_preemption) {
+    bool x = false;
+    unsigned preempted = 0;
+    auto f = later().then([&x] {
+            x = true;
+        });
+
+    // try to preempt 1000 times. 1 should be enough if not for
+    // task queue shaffling in debug mode which may cause co-routine
+    // continuation to run first.
+    while(preempted < 1000 && !x) {
+        preempted += need_preempt(); 
+        co_await make_ready_future<>();
+    }
+    auto save_x = x;
+    // wait for later() to complete
+    co_await std::move(f);
+    BOOST_REQUIRE(save_x);
+    co_return;
+}
+#endif

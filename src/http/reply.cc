@@ -31,6 +31,7 @@
 #include <seastar/http/reply.hh>
 #include <seastar/core/print.hh>
 #include <seastar/http/httpd.hh>
+#include <seastar/core/loop.hh>
 
 namespace seastar {
 
@@ -38,6 +39,7 @@ namespace httpd {
 
 namespace status_strings {
 
+const sstring continue_ = " 100 Continue\r\n";
 const sstring ok = " 200 OK\r\n";
 const sstring created = " 201 Created\r\n";
 const sstring accepted = " 202 Accepted\r\n";
@@ -50,6 +52,8 @@ const sstring bad_request = " 400 Bad Request\r\n";
 const sstring unauthorized = " 401 Unauthorized\r\n";
 const sstring forbidden = " 403 Forbidden\r\n";
 const sstring not_found = " 404 Not Found\r\n";
+const sstring length_required = " 411 Length Required\r\n";
+const sstring payload_too_large = " 413 Payload Too Large\r\n";
 const sstring internal_server_error = " 500 Internal Server Error\r\n";
 const sstring not_implemented = " 501 Not Implemented\r\n";
 const sstring bad_gateway = " 502 Bad Gateway\r\n";
@@ -57,6 +61,8 @@ const sstring service_unavailable = " 503 Service Unavailable\r\n";
 
 static const sstring& to_string(reply::status_type status) {
     switch (status) {
+    case reply::status_type::continue_:
+        return continue_;
     case reply::status_type::ok:
         return ok;
     case reply::status_type::created:
@@ -81,6 +87,10 @@ static const sstring& to_string(reply::status_type status) {
         return forbidden;
     case reply::status_type::not_found:
         return not_found;
+    case reply::status_type::length_required:
+        return length_required;
+    case reply::status_type::payload_too_large:
+        return payload_too_large;
     case reply::status_type::internal_server_error:
         return internal_server_error;
     case reply::status_type::not_implemented:
