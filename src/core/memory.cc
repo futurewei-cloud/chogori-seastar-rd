@@ -592,8 +592,10 @@ scoped_heap_profiling::~scoped_heap_profiling() {
 #else
 
 void set_heap_profiling_enabled(bool enable) {
-    seastar_logger.warn("Seastar compiled without heap profiling support, heap profiler not supported;"
+    if (enable) {
+        seastar_logger.warn("Seastar compiled without heap profiling support, heap profiler not supported;"
             " compile with the Seastar_HEAP_PROFILING=ON CMake option to add heap profiling support");
+    }
 }
 
 scoped_heap_profiling::scoped_heap_profiling() noexcept {
@@ -1045,7 +1047,7 @@ static allocate_anonymous_memory(void* where, size_t how_much) {
 }
 
 mmap_area
-allocate_hugetlbfs_memory(compat::optional<void*> where, size_t how_much) {
+allocate_hugetlbfs_memory(std::optional<void*> where, size_t how_much) {
     return mmap_anonymous(where.value_or(nullptr),
             how_much,
             PROT_READ | PROT_WRITE,

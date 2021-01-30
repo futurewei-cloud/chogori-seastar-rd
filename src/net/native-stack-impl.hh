@@ -207,13 +207,13 @@ data_sink native_connected_socket_impl<Protocol>::sink() {
 template <typename Protocol>
 void
 native_connected_socket_impl<Protocol>::shutdown_input() {
-    _conn->close_read();
+    (void)_conn->close_read();
 }
 
 template <typename Protocol>
 void
 native_connected_socket_impl<Protocol>::shutdown_output() {
-    _conn->close_write();
+    (void)_conn->close_write();
 }
 
 template <typename Protocol>

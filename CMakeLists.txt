@@ -59,10 +59,6 @@ option (Seastar_DEBUG_ALLOCATIONS
   "For now just writes 0xab to newly allocated memory"
   OFF)
 
-option (Seastar_SSTRING
-  "Use seastar's own string implementation"
-  ON)
-
 set (Seastar_API_LEVEL
   "6"
   CACHE
@@ -832,10 +828,6 @@ if (MaybeUninitialized_FOUND)
       # -Wmaybe-uninitialized in here since otherwise we would have to
       # disable it on many types used inside optional<>.
       -Wno-maybe-uninitialized)
-endif ()
-
-if (Seastar_SSTRING)
-  target_compile_options (seastar PUBLIC -DSEASTAR_SSTRING)
 endif ()
 
 if (LinuxMembarrier_FOUND)

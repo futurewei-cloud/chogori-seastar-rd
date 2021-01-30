@@ -203,7 +203,7 @@ public:
 
     static constexpr uint32_t RCDataSize = 8192;
 private:
-    compat::optional<reactor::poller> RDMAPoller;
+    std::optional<reactor::poller> RDMAPoller;
     struct ibv_pd* protectionDomain = nullptr;
     struct ibv_mr* memRegionHandle = nullptr;
     struct ibv_qp* UDQP = nullptr;

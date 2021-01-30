@@ -2527,30 +2527,6 @@ public:
     }
 };
 
-class reactor::epoll_pollfn final : public reactor::pollfn {
-    reactor& _r;
-    uint32_t count=0;
-public:
-    epoll_pollfn(reactor& r) : _r(r) {}
-    virtual bool poll() final override {
-        ++count;
-        if (count % 1000 != 0) {
-            return false;
-        }
-        return _r.wait_and_process();
-    }
-    virtual bool pure_poll() override final {
-        return poll(); // actually performs work, but triggers no user continuations, so okay
-    }
-    virtual bool try_enter_interrupt_mode() override {
-        // Since we'll be sleeping in epoll, no need to do anything
-        // for interrupt mode.
-        return true;
-    }
-    virtual void exit_interrupt_mode() override final {
-    }
-};
-
 void
 reactor::wakeup() {
     uint64_t one = 1;

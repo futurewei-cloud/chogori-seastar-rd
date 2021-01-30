@@ -945,8 +945,8 @@ template <typename InetTraits>
 tcp<InetTraits>::connection::~connection() {
     if (_tcb) {
         _tcb->_conn = nullptr;
-        close_read();
-        close_write();
+        (void)close_read();
+        (void)close_write();
     }
 }
 
@@ -2110,8 +2110,8 @@ void tcp<InetTraits>::connection::shutdown_connect() {
       _tcb->_connect_done.set_exception(tcp_refused_error());
       _tcb->cleanup();
     } else {
-        close_read();
-        close_write();
+        (void)close_read();
+        (void)close_write();
     }
 }
 

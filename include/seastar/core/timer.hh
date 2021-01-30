@@ -113,6 +113,7 @@ public:
         t._queued = false;
         t._armed = false;
     }
+
     timer& operator=(timer&& t) noexcept {
         _callback = std::move(t._callback);
         _expiry = std::move(t._expiry);
@@ -125,7 +126,7 @@ public:
         t._armed = false;
         return *this;
     }
-    explicit timer(callback_t&& callback) : _callback{std::move(callback)} {
+
     /// Constructs a timer with a callback. The timer is not armed.
     ///
     /// \param sg Scheduling group to run the callback under.

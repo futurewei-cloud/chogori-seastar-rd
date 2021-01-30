@@ -75,8 +75,8 @@ void log_buf::realloc_buffer() {
 }
 
 log_buf::log_buf()
-    : _begin(new char[512])
-    , _end(_begin + 512)
+    : _begin(new char[4096])
+    , _end(_begin + 4096)
     , _current(_begin)
     , _own_buf(true)
 {
