@@ -22,7 +22,6 @@
 #include <iostream>
 
 #include <seastar/core/app-template.hh>
-#include <seastar/core/future-util.hh>
 #include <seastar/core/reactor.hh>
 #include <seastar/core/posix.hh>
 #include <seastar/testing/test_runner.hh>
@@ -30,8 +29,6 @@
 namespace seastar {
 
 namespace testing {
-
-thread_local std::default_random_engine local_random_engine;
 
 static test_runner instance;
 
@@ -62,11 +59,12 @@ test_runner::start(int ac, char** av) {
 
     auto init_outcome = std::make_shared<exchanger<bool>>();
 
+    namespace bpo = boost::program_options;
     _thread = std::make_unique<posix_thread>([this, ac, av, init_outcome]() mutable {
         app_template app;
         app.add_options()
-            ("random-seed", boost::program_options::value<unsigned>(), "Random number generator seed")
-            ("fail-on-abandoned-failed-futures", "Fail the test if there are any abandoned failed futures");
+            ("random-seed", bpo::value<unsigned>(), "Random number generator seed")
+            ("fail-on-abandoned-failed-futures", bpo::value<bool>()->default_value(true), "Fail the test if there are any abandoned failed futures");
         // We guarantee that only one thread is running.
         // We only read this after that one thread is joined, so this is safe.
         _exit_code = app.run(ac, av, [this, &app, init_outcome = init_outcome.get()] {
@@ -76,7 +74,7 @@ test_runner::start(int ac, char** av) {
                 auto seed = conf_seed.empty() ? std::random_device()():  conf_seed.as<unsigned>();
                 std::cout << "random-seed=" << seed << '\n';
                 return smp::invoke_on_all([seed] {
-                    auto local_seed = seed + engine().cpu_id();
+                    auto local_seed = seed + this_shard_id();
                     local_random_engine.seed(local_seed);
                 });
             };
@@ -92,10 +90,10 @@ test_runner::start(int ac, char** av) {
                     return make_ready_future<>();
                 }
               }).or_terminate();
-            }).then([this, &app] {
+            }).then([&app] {
                 if (engine().abandoned_failed_futures()) {
                     std::cerr << "*** " << engine().abandoned_failed_futures() << " abandoned failed future(s) detected\n";
-                    if (app.configuration().count("fail-on-abandoned-failed-futures")) {
+                    if (app.configuration()["fail-on-abandoned-failed-futures"].as<bool>()) {
                         std::cerr << "Failing the test because fail was requested by --fail-on-abandoned-failed-futures\n";
                         return 3;
                     }

@@ -34,7 +34,6 @@
 #include <seastar/core/sstring.hh>
 #include <unordered_map>
 #include <seastar/http/mime_types.hh>
-#include <seastar/core/future-util.hh>
 #include <seastar/core/iostream.hh>
 #include <seastar/util/noncopyable_function.hh>
 
@@ -53,6 +52,7 @@ struct reply {
      * The status of the reply.
      */
     enum class status_type {
+        continue_ = 100, //!< continue
         ok = 200, //!< ok
         created = 201, //!< created
         accepted = 202, //!< accepted
@@ -65,6 +65,8 @@ struct reply {
         unauthorized = 401, //!< unauthorized
         forbidden = 403, //!< forbidden
         not_found = 404, //!< not_found
+        length_required = 411, //!< length_required
+        payload_too_large = 413, //!< payload_too_large
         internal_server_error = 500, //!< internal_server_error
         not_implemented = 501, //!< not_implemented
         bad_gateway = 502, //!< bad_gateway

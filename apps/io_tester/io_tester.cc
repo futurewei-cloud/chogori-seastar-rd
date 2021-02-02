@@ -29,6 +29,8 @@
 #include <seastar/core/timer.hh>
 #include <seastar/core/thread.hh>
 #include <seastar/core/print.hh>
+#include <seastar/core/loop.hh>
+#include <seastar/core/with_scheduling_group.hh>
 #include <chrono>
 #include <vector>
 #include <boost/range/irange.hpp>
@@ -53,9 +55,6 @@ using namespace boost::accumulators;
 
 static auto random_seed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 static std::default_random_engine random_generator(random_seed);
-// size of each individual file. Every class will have its file, so in a normal system with many shards, we'll naturally have many files and
-// that will push the data out of the disk's cache. And static sizes per file are simpler.
-static constexpr uint64_t file_data_size = 1ull << 30;
 
 class context;
 enum class request_type { seqread, seqwrite, randread, randwrite, append, cpu };
@@ -100,6 +99,10 @@ struct shard_info {
     seastar::scheduling_group scheduling_group = seastar::default_scheduling_group();
 };
 
+struct options {
+    bool dsync = false;
+};
+
 class class_data;
 
 struct job_config {
@@ -107,6 +110,11 @@ struct job_config {
     request_type type;
     shard_config shard_placement;
     ::shard_info shard_info;
+    ::options options;
+    // size of each individual file. Every class and every shard have its file, so in a normal
+    // system with many shards we'll naturally have many files and that will push the data out
+    // of the disk's cache
+    uint64_t file_size;
     std::unique_ptr<class_data> gen_class_data();
 };
 
@@ -128,6 +136,7 @@ protected:
 
     std::chrono::steady_clock::time_point _start = {};
     accumulator_type _latencies;
+    uint64_t _requests = 0;
     std::uniform_int_distribution<uint32_t> _pos_distribution;
     file _file;
 
@@ -141,7 +150,7 @@ public:
         , _iop(engine().register_one_priority_class(format("test-class-{:d}", idgen()), _config.shard_info.shares))
         , _sg(cfg.shard_info.scheduling_group)
         , _latencies(extended_p_square_probabilities = quantiles)
-        , _pos_distribution(0,  file_data_size / _config.shard_info.request_size)
+        , _pos_distribution(0,  _config.file_size / _config.shard_info.request_size)
     {}
 
     virtual ~class_data() = default;
@@ -188,6 +197,13 @@ public:
     future<> start(sstring dir) {
         return do_start(dir);
     }
+
+    future<> stop() {
+        if (_file) {
+            return _file.close();
+        }
+        return make_ready_future<>();
+    }
 protected:
     sstring type_str() const {
         return std::unordered_map<request_type, sstring>{
@@ -232,6 +248,10 @@ protected:
         return _total_duration;
     }
 
+    uint64_t file_size_mb() const {
+        return _config.file_size >> 20;
+    }
+
     uint64_t total_data() const {
         return _data;
     }
@@ -248,6 +268,10 @@ protected:
         return quantile(_latencies, quantile_probability = q);
     }
 
+    uint64_t requests() const noexcept {
+        return _requests;
+    }
+
     bool is_sequential() const {
         return (req_type() == request_type::seqread) || (req_type() == request_type::seqwrite);
     }
@@ -261,7 +285,7 @@ protected:
             pos = _pos_distribution(random_generator) * req_size();
         } else {
             pos = _last_pos + req_size();
-            if (is_sequential() && (pos >= file_data_size)) {
+            if (is_sequential() && (pos >= _config.file_size)) {
                 pos = 0;
             }
         }
@@ -272,6 +296,7 @@ protected:
     void add_result(size_t data, std::chrono::microseconds latency) {
         _data += data;
         _latencies(latency.count());
+        _requests++;
     }
 
 public:
@@ -284,14 +309,18 @@ public:
     io_class_data(job_config cfg) : class_data(std::move(cfg)) {}
 
     future<> do_start(sstring dir) override {
-        auto fname = format("{}/test-{}-{:d}", dir, name(), engine().cpu_id());
-        return open_file_dma(fname, open_flags::rw | open_flags::create | open_flags::truncate).then([this, fname] (auto f) {
+        auto fname = format("{}/test-{}-{:d}", dir, name(), this_shard_id());
+        auto flags = open_flags::rw | open_flags::create | open_flags::truncate;
+        if (_config.options.dsync) {
+            flags |= open_flags::dsync;
+        }
+        return open_file_dma(fname, flags).then([this, fname] (auto f) {
             _file = f;
             return remove_file(fname);
         }).then([this, fname] {
             return do_with(seastar::semaphore(64), [this] (auto& write_parallelism) mutable {
                 auto bufsize = 256ul << 10;
-                auto pos = boost::irange(0ul, (file_data_size / bufsize) + 1);
+                auto pos = boost::irange(0ul, (_config.file_size / bufsize) + 1);
                 return parallel_for_each(pos.begin(), pos.end(), [this, bufsize, &write_parallelism] (auto pos) mutable {
                     return get_units(write_parallelism, 1).then([this, bufsize, pos] (auto perm) mutable {
                         auto bufptr = allocate_aligned_buffer<char>(bufsize, 4096);
@@ -313,13 +342,15 @@ public:
     }
 
     virtual sstring describe_class() override {
-        return fmt::format("{}: {} shares, {}-byte {}, {} concurrent requests, {}", name(), shares(), req_size(), type_str(), parallelism(), think_time());
+        return fmt::format("{}: {} shares, {}-byte {}, {}Mb file, {} concurrent requests, {}", name(), shares(), req_size(), type_str(), file_size_mb(), parallelism(), think_time());
     }
 
     virtual sstring describe_results() override {
         auto throughput_kbs = (total_data() >> 10) / total_duration().count();
+        auto iops = requests() / total_duration().count();
         sstring result;
         result += fmt::format("  Throughput         : {:>8} KB/s\n", throughput_kbs);
+        result += fmt::format("  IOPS               : {:>8}\n", iops);
         result += fmt::format("  Lat average        : {:>8} usec\n", average_latency());
         for (auto& q: quantiles) {
             result += fmt::format("  Lat quantile={:>5} : {:>8} usec\n", q, quantile_latency(q));
@@ -493,13 +524,34 @@ struct convert<shard_info> {
 };
 
 template<>
+struct convert<options> {
+    static bool decode(const Node& node, options& op) {
+        if (node["dsync"]) {
+            op.dsync = node["dsync"].as<bool>();
+        }
+        return true;
+    }
+};
+
+template<>
 struct convert<job_config> {
     static bool decode(const Node& node, job_config& cl) {
         cl.name = node["name"].as<std::string>();
         cl.type = node["type"].as<request_type>();
         cl.shard_placement = node["shards"].as<shard_config>();
+        // The data_size is used to divide the available (and effectively
+        // constant) disk space between workloads. Each shard inside the
+        // workload thus uses its portion of the assigned space.
+        if (node["data_size"]) {
+            cl.file_size = node["data_size"].as<byte_size>().size / smp::count;
+        } else {
+            cl.file_size = 1ull << 30; // 1G by default
+        }
         if (node["shard_info"]) {
             cl.shard_info = node["shard_info"].as<shard_info>();
+        }
+        if (node["options"]) {
+            cl.options = node["options"].as<options>();
         }
         return true;
     }
@@ -518,7 +570,7 @@ class context {
 public:
     context(sstring dir, std::vector<job_config> req_config, unsigned duration)
             : _cl(boost::copy_range<std::vector<std::unique_ptr<class_data>>>(req_config
-                | boost::adaptors::filtered([] (auto& cfg) { return cfg.shard_placement.is_set(engine().cpu_id()); })
+                | boost::adaptors::filtered([] (auto& cfg) { return cfg.shard_placement.is_set(this_shard_id()); })
                 | boost::adaptors::transformed([] (auto& cfg) { return cfg.gen_class_data(); })
             ))
             , _dir(dir)
@@ -526,7 +578,11 @@ public:
             , _finished(0)
     {}
 
-    future<> stop() { return make_ready_future<>(); }
+    future<> stop() {
+        return parallel_for_each(_cl, [] (std::unique_ptr<class_data>& cl) {
+            return cl->stop();
+        });
+    }
 
     future<> start() {
         return parallel_for_each(_cl, [this] (std::unique_ptr<class_data>& cl) {
@@ -544,7 +600,7 @@ public:
 
     future<> print_stats() {
         return _finished.wait(_cl.size()).then([this] {
-            fmt::print("Shard {:>2}\n", engine().cpu_id());
+            fmt::print("Shard {:>2}\n", this_shard_id());
             auto idx = 0;
             for (auto& cl: _cl) {
                 fmt::print("Class {:>2} ({})\n", idx++, cl->describe_class());
@@ -610,6 +666,7 @@ int main(int ac, char** av) {
                     return c.print_stats();
                 }).get();
             }
+            ctx.stop().get0();
         }).or_terminate();
     });
 }

@@ -22,6 +22,7 @@
 #include <seastar/net/ip.hh>
 #include <seastar/net/virtio.hh>
 #include <seastar/net/tcp.hh>
+#include <seastar/core/reactor.hh>
 #include <fmt/printf.h>
 
 using namespace seastar;
@@ -39,7 +40,7 @@ struct tcp_test {
             (void)tcp_conn.wait_for_data().then([this] {
                 auto p = tcp_conn.read();
                 if (!p.len()) {
-                    tcp_conn.close_write();
+                    (void)tcp_conn.close_write();
                     return;
                 }
                 fmt::print("read {:d} bytes\n", p.len());

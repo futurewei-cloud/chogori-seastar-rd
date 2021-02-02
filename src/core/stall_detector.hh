@@ -27,10 +27,12 @@
 #include <chrono>
 #include <functional>
 #include <seastar/core/posix.hh>
+#include <seastar/core/metrics_registration.hh>
 
 namespace seastar {
 
 class reactor;
+class thread_cputime_clock;
 
 namespace internal {
 
@@ -43,12 +45,12 @@ struct cpu_stall_detector_config {
 
 // Detects stalls in continuations that run for too long
 class cpu_stall_detector {
-    reactor* _r;
     timer_t _timer;
     std::atomic<uint64_t> _last_tasks_processed_seen{};
     unsigned _stall_detector_reports_per_minute;
     std::atomic<uint64_t> _stall_detector_missed_ticks = { 0 };
     unsigned _reported = 0;
+    unsigned _total_reported = 0;
     unsigned _max_reports_per_minute;
     unsigned _shard_id;
     unsigned _thread_id;
@@ -59,13 +61,16 @@ class cpu_stall_detector {
     std::chrono::steady_clock::duration _threshold;
     std::chrono::steady_clock::duration _slack;
     cpu_stall_detector_config _config;
+    seastar::metrics::metric_groups _metrics;
     friend reactor;
 private:
     void maybe_report();
     void arm_timer();
     void report_suppressions(std::chrono::steady_clock::time_point now);
 public:
-    cpu_stall_detector(reactor* r, cpu_stall_detector_config cfg = {});
+    using clock_type = thread_cputime_clock;
+public:
+    explicit cpu_stall_detector(cpu_stall_detector_config cfg = {});
     ~cpu_stall_detector();
     static int signal_number() { return SIGRTMIN + 1; }
     void start_task_run(std::chrono::steady_clock::time_point now);

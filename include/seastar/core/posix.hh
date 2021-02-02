@@ -37,7 +37,6 @@
 #include <sys/mman.h>
 #include <signal.h>
 #include <system_error>
-#include <boost/optional.hpp>
 #include <pthread.h>
 #include <signal.h>
 #include <memory>
@@ -77,7 +76,7 @@ class file_desc {
 public:
     file_desc() = delete;
     file_desc(const file_desc&) = delete;
-    file_desc(file_desc&& x) : _fd(x._fd) { x._fd = -1; }
+    file_desc(file_desc&& x) noexcept : _fd(x._fd) { x._fd = -1; }
     ~file_desc() { if (_fd != -1) { ::close(_fd); } }
     void operator=(const file_desc&) = delete;
     file_desc& operator=(file_desc&& x) {
@@ -96,6 +95,11 @@ public:
         _fd = -1;
     }
     int get() const { return _fd; }
+
+    static file_desc from_fd(int fd) {
+        return file_desc(fd);
+    }
+
     static file_desc open(sstring name, int flags, mode_t mode = 0) {
         int fd = ::open(name.c_str(), flags, mode);
         throw_system_error_on(fd == -1, "open");
@@ -127,20 +131,19 @@ public:
         throw_system_error_on(fd == -1, "dup");
         return file_desc(fd);
     }
-    file_desc accept(socket_address& sa, socklen_t& sl, int flags = 0) {
-        auto ret = ::accept4(_fd, &sa.as_posix_sockaddr(), &sl, flags);
+    file_desc accept(socket_address& sa, int flags = 0) {
+        auto ret = ::accept4(_fd, &sa.as_posix_sockaddr(), &sa.addr_length, flags);
         throw_system_error_on(ret == -1, "accept4");
-        sa.addr_length = sl;
         return file_desc(ret);
     }
+    static file_desc inotify_init(int flags);
     // return nullopt if no connection is availbale to be accepted
-    compat::optional<file_desc> try_accept(socket_address& sa, socklen_t& sl, int flags = 0) {
-        auto ret = ::accept4(_fd, &sa.as_posix_sockaddr(), &sl, flags);
+    std::optional<file_desc> try_accept(socket_address& sa, int flags = 0) {
+        auto ret = ::accept4(_fd, &sa.as_posix_sockaddr(), &sa.addr_length, flags);
         if (ret == -1 && errno == EAGAIN) {
             return {};
         }
         throw_system_error_on(ret == -1, "accept4");
-        sa.addr_length = sl;
         return file_desc(ret);
     }
     void shutdown(int how) {
@@ -189,6 +192,11 @@ public:
         throw_system_error_on(r == -1, "setsockopt");
         return r;
     }
+    int setsockopt(int level, int optname, const void* data, socklen_t len) {
+        int r = ::setsockopt(_fd, level, optname, data, len);
+        throw_system_error_on(r == -1, "setsockopt");
+        return r;
+    }
     template <typename Data>
     Data getsockopt(int level, int optname) {
         Data data;
@@ -209,7 +217,7 @@ public:
         throw_system_error_on(r == -1, "fstat");
         return buf.st_size;
     }
-    boost::optional<size_t> read(void* buffer, size_t len) {
+    std::optional<size_t> read(void* buffer, size_t len) {
         auto r = ::read(_fd, buffer, len);
         if (r == -1 && errno == EAGAIN) {
             return {};
@@ -217,7 +225,7 @@ public:
         throw_system_error_on(r == -1, "read");
         return { size_t(r) };
     }
-    boost::optional<ssize_t> recv(void* buffer, size_t len, int flags) {
+    std::optional<ssize_t> recv(void* buffer, size_t len, int flags) {
         auto r = ::recv(_fd, buffer, len, flags);
         if (r == -1 && errno == EAGAIN) {
             return {};
@@ -225,7 +233,7 @@ public:
         throw_system_error_on(r == -1, "recv");
         return { ssize_t(r) };
     }
-    boost::optional<size_t> recvmsg(msghdr* mh, int flags) {
+    std::optional<size_t> recvmsg(msghdr* mh, int flags) {
         auto r = ::recvmsg(_fd, mh, flags);
         if (r == -1 && errno == EAGAIN) {
             return {};
@@ -233,7 +241,7 @@ public:
         throw_system_error_on(r == -1, "recvmsg");
         return { size_t(r) };
     }
-    boost::optional<size_t> send(const void* buffer, size_t len, int flags) {
+    std::optional<size_t> send(const void* buffer, size_t len, int flags) {
         auto r = ::send(_fd, buffer, len, flags);
         if (r == -1 && errno == EAGAIN) {
             return {};
@@ -241,7 +249,7 @@ public:
         throw_system_error_on(r == -1, "send");
         return { size_t(r) };
     }
-    boost::optional<size_t> sendto(socket_address& addr, const void* buf, size_t len, int flags) {
+    std::optional<size_t> sendto(socket_address& addr, const void* buf, size_t len, int flags) {
         auto r = ::sendto(_fd, buf, len, flags, &addr.u.sa, addr.length());
         if (r == -1 && errno == EAGAIN) {
             return {};
@@ -249,7 +257,7 @@ public:
         throw_system_error_on(r == -1, "sendto");
         return { size_t(r) };
     }
-    boost::optional<size_t> sendmsg(const msghdr* msg, int flags) {
+    std::optional<size_t> sendmsg(const msghdr* msg, int flags) {
         auto r = ::sendmsg(_fd, msg, flags);
         if (r == -1 && errno == EAGAIN) {
             return {};
@@ -278,7 +286,7 @@ public:
         auto fd = ::listen(_fd, backlog);
         throw_system_error_on(fd == -1, "listen");
     }
-    boost::optional<size_t> write(const void* buf, size_t len) {
+    std::optional<size_t> write(const void* buf, size_t len) {
         auto r = ::write(_fd, buf, len);
         if (r == -1 && errno == EAGAIN) {
             return {};
@@ -286,7 +294,7 @@ public:
         throw_system_error_on(r == -1, "write");
         return { size_t(r) };
     }
-    boost::optional<size_t> writev(const iovec *iov, int iovcnt) {
+    std::optional<size_t> writev(const iovec *iov, int iovcnt) {
         auto r = ::writev(_fd, iov, iovcnt);
         if (r == -1 && errno == EAGAIN) {
             return {};
