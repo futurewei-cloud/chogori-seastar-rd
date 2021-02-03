@@ -29,6 +29,7 @@ else
 fi
 
 debian_packages=(
+    git
     ninja-build
     ragel
     libhwloc-dev
@@ -239,7 +240,7 @@ cd deps
 if [ ! -d "fmt" ]; then git clone https://github.com/fmtlib/fmt.git; fi
 
 cd fmt
-git checkout 6.1.2
+git checkout 7.1.3
 mkdir -p build
 cd build
 cmake ..
