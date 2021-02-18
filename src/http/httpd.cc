@@ -82,7 +82,7 @@ future<> connection::do_response_loop() {
 
 future<> connection::start_response() {
     if (_resp->_body_writer) {
-        return _resp->write_reply_to_connection(*this).then_wrapped([this] (auto f) {
+        return _resp->write_reply_to_stream(_write_buf).then_wrapped([this] (auto f) {
             if (f.failed()) {
                 // In case of an error during the write close the connection
                 _server._respond_errors++;
@@ -123,7 +123,7 @@ future<> connection::start_response() {
             _resp->_content.size());
     return _write_buf.write(_resp->_response_line.data(),
             _resp->_response_line.size()).then([this] {
-        return _resp->write_reply_headers(*this);
+        return _resp->write_reply_headers(_write_buf);
     }).then([this] {
         return _write_buf.write("\r\n", 2);
     }).then([this] {
