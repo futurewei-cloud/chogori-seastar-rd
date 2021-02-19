@@ -169,6 +169,13 @@ struct reply {
     void write_body(const sstring& content_type, const sstring& content);
 
     /*!
+     * \brief Write the body in this reply to the given stream
+     *
+     * \param out - the stream to write the reply into
+     */
+    future<> write_reply_body_to_stream(output_stream<char>& out);
+
+    /*!
      * \brief Write this reply to the given output stream
      *
      * \param out - the stream to write the reply into

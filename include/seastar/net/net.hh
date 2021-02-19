@@ -303,6 +303,13 @@ public:
     }
 };
 
+// The max data size we can fit in a packet
+inline constexpr uint16_t tcpsegsize() {
+    return seastar::net::hw_features().mtu
+                - seastar::net::tcp_hdr_len_min
+                - seastar::net::ipv4_hdr_len_min
+                - seastar::net::eth_hdr_len;
+}
 }
 
 }
