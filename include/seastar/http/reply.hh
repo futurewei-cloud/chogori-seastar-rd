@@ -168,10 +168,23 @@ struct reply {
      */
     void write_body(const sstring& content_type, const sstring& content);
 
-private:
-    future<> write_reply_to_connection(connection& con);
-    future<> write_reply_headers(connection& connection);
+    /*!
+     * \brief Write the body in this reply to the given stream
+     *
+     * \param out - the stream to write the reply into
+     */
+    future<> write_reply_body_to_stream(output_stream<char>& out);
 
+    /*!
+     * \brief Write this reply to the given output stream
+     *
+     * \param out - the stream to write the reply into
+     */
+    future<> write_reply_to_stream(output_stream<char>& out);
+
+    future<> write_reply_headers(output_stream<char>& out);
+
+private:
     noncopyable_function<future<>(output_stream<char>&&)> _body_writer;
     friend class routes;
     friend class connection;

@@ -32,6 +32,7 @@
 #include <seastar/core/print.hh>
 #include <seastar/http/httpd.hh>
 #include <seastar/core/loop.hh>
+#include <seastar/net/net.hh>
 
 namespace seastar {
 
@@ -147,7 +148,7 @@ public:
 };
 
 static output_stream<char> make_http_chunked_output_stream(output_stream<char>& out) {
-    return output_stream<char>(http_chunked_data_sink(out), 32000, true);
+    return output_stream<char>(http_chunked_data_sink(out), net::tcpsegsize(), true);
 }
 
 
@@ -161,21 +162,26 @@ void reply::write_body(const sstring& content_type, const sstring& content) {
     done(content_type);
 }
 
-future<> reply::write_reply_to_connection(connection& con) {
+future<> reply::write_reply_body_to_stream(output_stream<char>& out) {
     add_header("Transfer-Encoding", "chunked");
-    return con.out().write(response_line()).then([this, &con] () mutable {
-        return write_reply_headers(con);
-    }).then([&con] () mutable {
-        return con.out().write("\r\n", 2);
-    }).then([this, &con] () mutable {
-        return _body_writer(make_http_chunked_output_stream(con.out()));
-    });
-
+    return write_reply_headers(out)
+        .then([&out] () mutable {
+            return out.write("\r\n", 2);
+        }).then([this, &out] () mutable {
+            return _body_writer(make_http_chunked_output_stream(out));
+        });
 }
 
-future<> reply::write_reply_headers(connection& con) {
-    return do_for_each(_headers, [&con](auto& h) {
-        return con.out().write(h.first + ": " + h.second + "\r\n");
+future<> reply::write_reply_to_stream(output_stream<char>& out) {
+        return out.write(response_line())
+        .then([this, &out] {
+            return write_reply_body_to_stream(out);
+        });
+}
+
+future<> reply::write_reply_headers(output_stream<char>& out) {
+    return do_for_each(_headers, [&out](auto& h) {
+        return out.write(h.first + ": " + h.second + "\r\n");
     });
 }
 
