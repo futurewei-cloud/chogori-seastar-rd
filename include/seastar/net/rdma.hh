@@ -117,8 +117,6 @@ struct EndPoint {
     static int StringToGID(const sstring& strGID, union ibv_gid& result);
 };
 
-class RDMAConnectionError : std::exception {};
-
 class RDMAConnection : public weakly_referencable<RDMAConnection> {
 public:
     future<Buffer> recv();

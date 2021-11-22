@@ -84,7 +84,7 @@ future<> RDMAConnection::makeQP() {
         struct ibv_qp* QP = ibv_create_qp(PD, &init_attr);
         if (!QP) {
             K2ERROR("Failed to create RC QP: " << strerror(errno));
-            throw RDMAConnectionError();
+            return QP;
         }
 
         // Transition QP to INIT state
@@ -94,14 +94,23 @@ future<> RDMAConnection::makeQP() {
         if (int err = ibv_modify_qp(QP, &attr, IBV_QP_STATE | IBV_QP_PKEY_INDEX |
                                                IBV_QP_PORT | IBV_QP_ACCESS_FLAGS)) {
             K2ERROR("failed to transition RC QP into init state: " << strerror(err));
-            throw RDMAConnectionError();
+            ibv_destroy_qp(QP);
+            QP = nullptr;
+            return QP;
         }
 
         return QP;
     }).
     then([conn=weak_from_this()] (struct ibv_qp* newQP) {
         if (!conn) {
-            ibv_destroy_qp(newQP);
+            if (newQP) {
+                ibv_destroy_qp(newQP);
+            }
+            return;
+        }
+
+        if (!newQP) {
+            conn->shutdownConnection();
             return;
         }
 
@@ -199,7 +208,7 @@ future<> RDMAConnection::completeHandshake(uint32_t remoteQP) {
                                     IBV_QP_RQ_PSN | IBV_QP_MAX_DEST_RD_ATOMIC |
                                     IBV_QP_MIN_RNR_TIMER | IBV_QP_DEST_QPN)) {
             K2ERROR("failed to transition RC QP into RTR: " << strerror(err));
-            throw RDMAConnectionError();
+            return err;
         }
 
         // Transition QP to RTS state
@@ -214,12 +223,17 @@ future<> RDMAConnection::completeHandshake(uint32_t remoteQP) {
                                     IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT |
                                     IBV_QP_RNR_RETRY | IBV_QP_MAX_QP_RD_ATOMIC)) {
             K2ERROR("failed to transition RC QP into RTS: " << strerror(err));
-            throw RDMAConnectionError();
+            return err;
         }
 
         return 0;
-    }).then([conn=weak_from_this()] (int) {
+    }).then([conn=weak_from_this()] (int err) {
         if (!conn) {
+            return;
+        }
+
+        if (err) {
+            conn->shutdownConnection();
             return;
         }
 
@@ -752,7 +766,6 @@ std::unique_ptr<RDMAConnection> RDMAStack::connect(const EndPoint& remote) {
 void RDMAStack::processUDMessage(UDMessage* message, EndPoint remote) {
     if (message->op == UDOps::HandshakeRequest) {
         std::unique_ptr<RDMAConnection> conn = std::make_unique<RDMAConnection>(this, remote);
-        handshakeLookup[message->requestId] = conn->weak_from_this();
         conn->processHandshakeRequest(message->QPNum, message->requestId);
 
         if (acceptPromiseActive) {
