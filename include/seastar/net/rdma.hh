@@ -213,6 +213,7 @@ private:
     };
     struct UDMessage {
         UDOps op;
+        union ibv_gid GID;
         uint32_t QPNum;
         uint32_t requestId;
     };
