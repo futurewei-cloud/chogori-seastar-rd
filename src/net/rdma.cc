@@ -764,8 +764,6 @@ future<std::unique_ptr<RDMAConnection>> RDMAStack::accept() {
 std::unique_ptr<RDMAConnection> RDMAStack::connect(const EndPoint& remote) {
     std::unique_ptr<RDMAConnection> conn = std::make_unique<RDMAConnection>(this, remote);
     auto rgid = EndPoint::GIDToString(remote.GID);
-    auto my_msg = "Making connect to: " + rgid + " QP: " + std::to_string(remote.UDQP);
-    K2WARN(my_msg);
     conn->makeHandshakeRequest();
     return conn;
 }
@@ -919,12 +917,6 @@ bool RDMAStack::processUDCQ() {
             int idx = WCs[i].wr_id;
 
             UDMessage* message = (UDMessage*)(UDQPRRs.Segments[idx].addr+UDDataOffset);
-            struct ibv_grh* grh = (struct ibv_grh*)UDQPRRs.Segments[idx].addr;
-            auto sgid = EndPoint::GIDToString(message->GID);
-            auto dgid = EndPoint::GIDToString(grh->dgid);
-            auto self_gid = EndPoint::GIDToString(localEndpoint.GID);
-            auto my_msg = "got UD message, dest " + dgid + ", source " + sgid + ", local " + self_gid;
-            K2WARN(my_msg);
             processUDMessage(message, EndPoint(message->GID, WCs[i].src_qp));
 
             UDQPRRs.RecvRequests[idx].next = nullptr;
