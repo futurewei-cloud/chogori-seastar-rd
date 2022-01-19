@@ -619,6 +619,10 @@ future<struct ibv_ah*> RDMAStack::getAH(const union ibv_gid& GID) {
         fillAHAttr(AHAttr, GID);
 
         AH = ibv_create_ah(stack->protectionDomain, &AHAttr);
+        if (!AH) {
+            auto rgid = EndPoint::GIDToString(GID);
+            K2WARN("failed to create AH for GID: " << rgid << " due to: " <<strerror(errno));
+        }
         return AH;
     }).then([GID, stack=weak_from_this()] (struct ibv_ah* AH) {
         if (!stack || !AH) {
@@ -763,7 +767,6 @@ future<std::unique_ptr<RDMAConnection>> RDMAStack::accept() {
 
 std::unique_ptr<RDMAConnection> RDMAStack::connect(const EndPoint& remote) {
     std::unique_ptr<RDMAConnection> conn = std::make_unique<RDMAConnection>(this, remote);
-    auto rgid = EndPoint::GIDToString(remote.GID);
     conn->makeHandshakeRequest();
     return conn;
 }
