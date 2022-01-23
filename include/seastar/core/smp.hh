@@ -310,6 +310,7 @@ public:
     static bool main_thread() { return std::this_thread::get_id() == _tmain; }
 
     static std::string _rdma_device;
+    static uint8_t _rdma_gid;
 
     /// Runs a function on a remote core.
     ///

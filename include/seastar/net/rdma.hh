@@ -192,7 +192,7 @@ public:
     future<std::unique_ptr<RDMAConnection>> accept();
     std::unique_ptr<RDMAConnection> connect(const EndPoint& remote);
 
-    static std::unique_ptr<RDMAStack> makeRDMAStack(void* memRegion, size_t memRegionSize);
+    static std::unique_ptr<RDMAStack> makeRDMAStack(void* memRegion, size_t memRegionSize, uint8_t gid_index);
     RDMAStack() = default;
     ~RDMAStack() noexcept;
 
@@ -201,6 +201,9 @@ public:
 
     static constexpr uint32_t RCDataSize = 8192;
 private:
+    // The RDMA GID determines the IP address and version to use, and the RoCE version to use.
+    // For more info see: https://community.mellanox.com/s/article/howto-configure-roce-on-connectx-4
+    uint8_t gidIndex;
     std::optional<reactor::poller> RDMAPoller;
     struct ibv_pd* protectionDomain = nullptr;
     struct ibv_mr* memRegionHandle = nullptr;
@@ -237,7 +240,7 @@ private:
     static void processCompletedSRs(std::array<Buffer, SendWRData::maxWR>& buffers, SendWRData& WRData, uint64_t signaledID);
     static constexpr int pollBatchSize = 16;
 
-    static void fillAHAttr(struct ibv_ah_attr& AHAttr, const union ibv_gid& GID);
+    void fillAHAttr(struct ibv_ah_attr& AHAttr, const union ibv_gid& GID);
     std::unordered_map<union ibv_gid, struct ibv_ah*> AHLookup;
     std::unordered_map<int, weak_ptr<RDMAConnection>> handshakeLookup;
     static std::unique_ptr<RDMAStack> makeUDQP(std::unique_ptr<RDMAStack> stack);
