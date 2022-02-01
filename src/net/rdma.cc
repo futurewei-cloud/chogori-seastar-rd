@@ -162,7 +162,7 @@ void RDMAConnection::processHandshakeRequest(uint32_t remoteQP, uint32_t respons
 void RDMAStack::fillAHAttr(struct ibv_ah_attr& AHAttr, const union ibv_gid& GID) {
     memset(&AHAttr, 0, sizeof(struct ibv_ah_attr));
     memcpy(AHAttr.grh.dgid.raw, GID.raw, 16);
-    AHAttr.grh.sgid_index = 1; // Index 1 is ROCEv2 address
+    AHAttr.grh.sgid_index = gidIndex; // Index 3 is ROCEv2 over IPv4 gid
     AHAttr.grh.hop_limit = 64; // Equivalent to IPv4 time to live
     AHAttr.is_global = 1; // Means use GID
     // For ConnectX-4 EN, we have one port per RDMA device, which starts at "1"
@@ -184,10 +184,10 @@ future<> RDMAConnection::completeHandshake(uint32_t remoteQP) {
     // This relies on the fact that QP deletion is also submitted to the
     // slow thread so that we know these modify_qp calls will be serialized
     // with deletion.
-    return engine()._thread_pool->submit<int>([QP=this->QP, remote=this->remote, remoteQP]() {
-        struct ibv_ah_attr AHAttr;
-        RDMAStack::fillAHAttr(AHAttr, remote.GID);
 
+    struct ibv_ah_attr AHAttr;
+    stack->fillAHAttr(AHAttr, remote.GID);
+    return engine()._thread_pool->submit<int>([AHAttr, QP=this->QP, remote=this->remote, remoteQP]() {
         // The timeout, rnr_retry, and min_rnr_timer values of ibv_qp_attr
         // do not have specific units,
         // e.g. the value assigned to timeout is an index into a lookup table
@@ -585,6 +585,7 @@ void RDMAStack::sendHandshakeResponse(const EndPoint& endpoint, uint32_t QPNum, 
     Buffer response(sizeof(UDMessage));
     UDMessage* message = (UDMessage*)response.get();
     message->op = UDOps::HandshakeResponse;
+    message->GID = localEndpoint.GID;
     message->QPNum = QPNum;
     message->requestId = id;
     sendUDQPMessage(std::move(response), endpoint.GID, endpoint.UDQP);
@@ -594,6 +595,7 @@ uint32_t RDMAStack::sendHandshakeRequest(const EndPoint& endpoint, uint32_t QPNu
     Buffer response(sizeof(UDMessage));
     UDMessage* message = (UDMessage*)response.get();
     message->op = UDOps::HandshakeRequest;
+    message->GID = localEndpoint.GID;
     message->QPNum = QPNum;
     uint32_t id = handshakeId++;
     message->requestId = id;
@@ -614,14 +616,20 @@ future<struct ibv_ah*> RDMAStack::getAH(const union ibv_gid& GID) {
         }
 
         struct ibv_ah_attr AHAttr;
-        fillAHAttr(AHAttr, GID);
+        stack->fillAHAttr(AHAttr, GID);
 
         AH = ibv_create_ah(stack->protectionDomain, &AHAttr);
         if (!AH) {
+            auto rgid = EndPoint::GIDToString(GID);
+            K2WARN("failed to create AH for GID: " << rgid << " due to: " <<strerror(errno));
+        }
+        return AH;
+    }).then([GID, stack=weak_from_this()] (struct ibv_ah* AH) {
+        if (!stack || !AH) {
             return AH;
         }
-
         stack->AHLookup[GID] = AH;
+
         return AH;
     });
 }
@@ -912,8 +920,7 @@ bool RDMAStack::processUDCQ() {
             int idx = WCs[i].wr_id;
 
             UDMessage* message = (UDMessage*)(UDQPRRs.Segments[idx].addr+UDDataOffset);
-            struct ibv_grh* grh = (struct ibv_grh*)UDQPRRs.Segments[idx].addr;
-            processUDMessage(message, EndPoint(grh->sgid, WCs[i].src_qp));
+            processUDMessage(message, EndPoint(message->GID, WCs[i].src_qp));
 
             UDQPRRs.RecvRequests[idx].next = nullptr;
             struct ibv_recv_wr* badRR;
@@ -1082,12 +1089,14 @@ std::unique_ptr<RDMAStack> RDMAStack::makeUDQP(std::unique_ptr<RDMAStack> stack)
     return stack;
 }
 
-std::unique_ptr<RDMAStack> RDMAStack::makeRDMAStack(void* memRegion, size_t memRegionSize) {
+std::unique_ptr<RDMAStack> RDMAStack::makeRDMAStack(void* memRegion, size_t memRegionSize, uint8_t gid_index) {
     if (!initialized || !ctx) {
         return nullptr;
     }
 
     std::unique_ptr<RDMAStack> stack = std::make_unique<RDMAStack>();
+
+    stack->gidIndex = gid_index;
 
     stack->protectionDomain = ibv_alloc_pd(ctx);
     if (!stack->protectionDomain) {
@@ -1101,8 +1110,8 @@ std::unique_ptr<RDMAStack> RDMAStack::makeRDMAStack(void* memRegion, size_t memR
         return nullptr;
     }
 
-    //Port 1 index 1 should be our ROCEv2 gid
-    ibv_query_gid(ctx, 1, 1, &(stack->localEndpoint.GID));
+    // For Mellanox ConnectX 4 and 5: only one port "1", and index 3 is our RoCEv2 over IPv4 GID
+    ibv_query_gid(ctx, 1, gid_index, &(stack->localEndpoint.GID));
 
     stack = makeUDQP(std::move(stack));
     if (!stack) {

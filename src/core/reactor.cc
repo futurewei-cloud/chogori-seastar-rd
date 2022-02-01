@@ -2717,7 +2717,8 @@ int reactor::run() {
     }
 
     if (smp::_rdma_device != "") {
-        _rdma_stack = rdma::RDMAStack::makeRDMAStack(memory::getMemRegionStart(), memory::getMemRegionSize());
+        _rdma_stack = rdma::RDMAStack::makeRDMAStack(memory::getMemRegionStart(), memory::getMemRegionSize(),
+                                                        smp::_rdma_gid);
         if (!_rdma_stack) {
             fmt::print("warning: failed to initialize rdma stack\n");
         }
@@ -3337,6 +3338,7 @@ reactor::get_options_description(reactor_config cfg) {
         ("poll-aio", bpo::value<bool>()->default_value(true),
                 "busy-poll for disk I/O (reduces latency and increases throughput)")
         ("rdma", bpo::value<std::string>()->default_value(""), "Enable the rdma network stack with the specified rdma device name")
+        ("rdma_gid", bpo::value<uint8_t>()->default_value(3), "Specify RDMA GID index to use. Default 3, which is the ROCEv2 over IPv4 GID on Mellanox ConnectX 4 and 5")
         ("task-quota-ms", bpo::value<double>()->default_value(cfg.task_quota / 1ms), "Max time (ms) between polls")
         ("max-task-backlog", bpo::value<unsigned>()->default_value(1000), "Maximum number of task backlog to allow; above this we ignore I/O")
         ("blocked-reactor-notify-ms", bpo::value<unsigned>()->default_value(200), "threshold in miliseconds over which the reactor is considered blocked if no progress is made")
@@ -3429,6 +3431,7 @@ std::thread::id smp::_tmain;
 unsigned smp::count = 1;
 bool smp::_using_dpdk;
 std::string smp::_rdma_device;
+uint8_t smp::_rdma_gid;
 
 void smp::start_all_queues()
 {
@@ -3744,6 +3747,7 @@ void smp::configure(boost::program_options::variables_map configuration, reactor
     _using_dpdk = configuration.count("dpdk-pmd");
 #endif
     _rdma_device = configuration["rdma"].as<std::string>();
+    _rdma_gid = configuration["rdma_gid"].as<uint8_t>();
     auto thread_affinity = configuration["thread-affinity"].as<bool>();
     if (configuration.count("overprovisioned")
            && configuration["thread-affinity"].defaulted()) {
